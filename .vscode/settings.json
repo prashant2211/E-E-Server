@@ -1,0 +1,8 @@
+{
+    "appService.defaultWebAppToDeploy": "undefined/subscriptions/90685625-e247-410b-877f-7f59e5a67c7e/resourceGroups/appsvc_linux_centralus/providers/Microsoft.Web/sites/EducationalEternity",
+    "appService.deploySubpath": ".",
+    "appService.zipIgnorePattern": [
+        "node_modules{,/**}",
+        ".vscode{,/**}"
+    ]
+}

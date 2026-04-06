@@ -1,0 +1,37 @@
+{
+  "name": "EducationalEternity",
+  "version": "0.0.1",
+  "description": "This app is related to manage all the education related things",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "nodemon server.js"
+  },
+  "author": "Prashant Raj, Ankul Abishek",
+  "license": "ISC",
+  "dependencies": {
+    "aws-sdk": "^2.1691.0",
+    "bcryptjs": "^2.4.3",
+    "body-parser": "^1.20.2",
+    "compression": "^1.8.1",
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.20",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "express-rate-limit": "^7.5.1",
+    "googleapis": "^146.0.0",
+    "helmet": "^7.2.0",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^8.5.1",
+    "morgan": "^1.10.0",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^4.2.1",
+    "nodemailer": "^6.9.16",
+    "nodemon": "^3.1.4",
+    "pdfkit": "^0.17.2",
+    "winston": "^3.19.0"
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}
