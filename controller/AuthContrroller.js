@@ -32,40 +32,71 @@ const mongoErrorMessages = {
   
 
 const register = async (req, res, next) => {
+    const normalizeUserType = (t) =>
+        String(t || '')
+            .trim()
+            .toLowerCase()
+            .replace(/\s+/g, '');
+
+    const isSuperAdminTarget = normalizeUserType(req.body.UserType) === 'superadmin';
+
     let instutionCode = req.body.InstutionCode;
-    if(instutionCode === ''){
-        instutionCode =  req.user.InstutionCode;
+    if (instutionCode === '') {
+        instutionCode = req.user?.InstutionCode;
     }
-    if (!instutionCode || String(instutionCode).trim() === '') {
+
+    let instution = null;
+    let institutionName = req.body.InstutionName;
+
+    if (isSuperAdminTarget) {
+        if (normalizeUserType(req.user?.UserType) !== 'superadmin') {
+            return res.status(403).json({
+                message: 'Only SuperAdmin can create SuperAdmin users',
+                success: false,
+                code: 403,
+            });
+        }
+        instutionCode =
+            (instutionCode && String(instutionCode).trim()) || 'SYSTEM';
+        institutionName =
+            (institutionName && String(institutionName).trim()) ||
+            'Educational Eternity Platform';
+    } else {
+        if (!instutionCode || String(instutionCode).trim() === '') {
+            return res.status(400).json({
+                message: 'Please pass the Instution Code!',
+                success: false,
+                code: 400,
+            });
+        }
+        instution = await InstutionModel.findOne({ Instution_Id: instutionCode });
+        if (institutionName === '') {
+            institutionName = instution?.Instution_Name;
+        }
+        if (!instution) {
+            return res.status(500).json({
+                message: 'Instution not found!',
+                success: false,
+                code: 500,
+            });
+        }
+    }
+
+    let memberId = req.body.MemberId;
+    if (isSuperAdminTarget && (!memberId || String(memberId).trim() === '')) {
+        const base = String(req.body.Email || req.body.UserName || 'user')
+            .replace(/[^a-zA-Z0-9]/g, '')
+            .slice(0, 32);
+        memberId = `SA-${base || Date.now()}`;
+    }
+    if (!isSuperAdminTarget && (!memberId || String(memberId).trim() === '')) {
         return res.status(400).json({
-            message: 'Please pass the Instution Code!',
+            message: 'Please pass the Member Id!',
             success: false,
             code: 400,
         });
     }
-    const instution = await InstutionModel.findOne({ Instution_Id: instutionCode })
-    
-    let institutionName = req.body.InstutionName;
-    
-    if(institutionName === ''){
-        institutionName =  instution.Instution_Name;
-    }
-    if(req.body.InstutionCode){
-   
-    if (!instution) {
-        return res.status(500).json({
-            message: 'Instution not found!',
-            success: false,
-            code: 500,
-        });
-    }
-    }else{
-        return res.status(500).json({
-            message: 'Please pass the Instution Code!',
-            success: false,
-            code: 500,
-        });
-    }
+
     const permissionsResult = await getPermissionSet(req);
     if(permissionsResult && permissionsResult.users.split("-").includes('W')){
     bcrypt.hash(req.body.Password, 10, function(err, hashedPass) {
@@ -78,13 +109,15 @@ const register = async (req, res, next) => {
             FirstName : req.body.Firstname,
             LastName : req.body.LastName,
             Email : req.body.Email,
-            InstutionName: req.body.InstutionName,
+            InstutionName: institutionName,
             Phone : req.body.Phone,
             UserName : req.body.UserName,
-            InstutionCode : req.body.InstutionCode,
-            MemberId: req.body.MemberId,
+            InstutionCode : instutionCode,
+            MemberId: memberId,
             UserType: req.body.UserType,
-            PermissionSet : req.body.PermissionSet,
+            PermissionSet : isSuperAdminTarget
+                ? (req.body.PermissionSet && String(req.body.PermissionSet).trim()) || 'all'
+                : req.body.PermissionSet,
             Password : hashedPass
         })
        
@@ -92,7 +125,7 @@ const register = async (req, res, next) => {
         .then(user => {
            
             let fullName = `${req.body.Firstname} ${req.body.LastName}`
-            emailVerification(req.body.Email, fullName, req.body.InstutionName, req.body.UserName, req.body.Password) 
+            emailVerification(req.body.Email, fullName, institutionName, req.body.UserName, req.body.Password) 
                 res.json({
                 success: true,
                 message: "User Added Sucessfully",
