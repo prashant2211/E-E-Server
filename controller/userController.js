@@ -101,7 +101,85 @@ const resetUserPassword = async (req, res, next) => {
 
 }
 
+const listSuperAdmins = async (req, res) => {
+    try {
+        const superAdmins = await user
+            .find({ UserType: { $regex: /^superadmin$/i } })
+            .select('FirstName LastName Email Phone UserName MemberId InstutionCode InstutionName UserType Verified createdAt updatedAt')
+            .sort({ createdAt: -1 });
+
+        return res.status(200).json({
+            success: true,
+            message: 'Super admin list retrieved successfully',
+            code: 200,
+            data: superAdmins || []
+        });
+    } catch (error) {
+        const matchedKey = Object.keys(mongoErrorMessages).find((key) => error.message.includes(key));
+        const errorMessage = matchedKey ? mongoErrorMessages[matchedKey] : error.message;
+        return res.status(500).json({
+            success: false,
+            message: errorMessage,
+            code: 500,
+            data: []
+        });
+    }
+}
+
+const deleteSuperAdmin = async (req, res) => {
+    try {
+        const { id } = req.params;
+        if (!id) {
+            return res.status(400).json({
+                success: false,
+                message: 'Super admin id is required',
+                code: 400,
+            });
+        }
+
+        if (String(req.user?.userId || '') === String(id)) {
+            return res.status(400).json({
+                success: false,
+                message: 'You cannot delete your own account',
+                code: 400,
+            });
+        }
+
+        const target = await user.findById(id);
+        if (!target) {
+            return res.status(404).json({
+                success: false,
+                message: 'Super admin not found',
+                code: 404,
+            });
+        }
+
+        const isSuperAdmin = /^superadmin$/i.test(String(target.UserType || ''));
+        if (!isSuperAdmin) {
+            return res.status(400).json({
+                success: false,
+                message: 'Selected user is not a super admin',
+                code: 400,
+            });
+        }
+
+        await user.findByIdAndDelete(id);
+        return res.status(200).json({
+            success: true,
+            message: 'Super admin deleted successfully',
+            code: 200,
+        });
+    } catch (error) {
+        const matchedKey = Object.keys(mongoErrorMessages).find((key) => error.message.includes(key));
+        const errorMessage = matchedKey ? mongoErrorMessages[matchedKey] : error.message;
+        return res.status(500).json({
+            success: false,
+            message: errorMessage,
+            code: 500,
+        });
+    }
+}
 
 module.exports = {
-    givePermissionAccess, resetUserPassword
+    givePermissionAccess, resetUserPassword, listSuperAdmins, deleteSuperAdmin
 }
