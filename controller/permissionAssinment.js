@@ -497,28 +497,57 @@ const getPermissionSet = async (req) => {
         let permissionType = user.PermissionSet;
         let isBlank = !permissionType || permissionType.trim() === '';
 
+        const basePermissions = data[resolvePermissionRoleKey(user.UserType)] || {};
+        const withSafeStrings = (obj) => {
+            const out = { ...obj };
+            Object.keys(basePermissions).forEach((k) => {
+                if (out[k] === undefined || out[k] === null) out[k] = basePermissions[k] || '';
+                if (typeof out[k] !== 'string') out[k] = String(out[k] || '');
+            });
+            // Ensure commonly used keys always exist as strings
+            [
+                'students',
+                'teachers',
+                'classes',
+                'users',
+                'attendenceRecordModels',
+                'notifications',
+                'scheduleClass',
+                'timetable',
+                'studentMarksheet',
+                'feeStructure',
+                'feePayment',
+            ].forEach((k) => {
+                if (out[k] === undefined || out[k] === null) out[k] = '';
+                if (typeof out[k] !== 'string') out[k] = String(out[k] || '');
+            });
+            return out;
+        };
+
         if (isBlank) {
             // Use default permissions based on UserType
             const permissionData = data[resolvePermissionRoleKey(user.UserType)];
-            return permissionData || {};  
+            return withSafeStrings(permissionData || {});  
         } else {
             // Query from the database if PermissionSet is specified
             try {
                 if (req.user.hasOwnProperty('MemberCode') && req.user.MemberCode) {
                     const permissionSets = await permissionAssinment.findOne({ MemberCode: req.user.MemberCode });
                     if (permissionSets) {
-                        return permissionSets.toObject ? permissionSets.toObject() : permissionSets; 
+                        const permissionObj = permissionSets.toObject ? permissionSets.toObject() : permissionSets;
+                        // Merge custom permission set over defaults so missing keys never crash controllers.
+                        return withSafeStrings({ ...basePermissions, ...permissionObj }); 
                     } else {
                         // Fallback to default permissions
-                        return data[resolvePermissionRoleKey(req.user.UserType)] || {};
+                        return withSafeStrings(data[resolvePermissionRoleKey(req.user.UserType)] || {});
                     }
                 } else {
-                    return data[resolvePermissionRoleKey(req.user.UserType)] || {};
+                    return withSafeStrings(data[resolvePermissionRoleKey(req.user.UserType)] || {});
                 }
             } catch (error) {
                 console.error(`Error retrieving permission set: ${error}`);
                 // Fallback to default permissions on error
-                return data[resolvePermissionRoleKey(req.user.UserType)] || {};
+                return withSafeStrings(data[resolvePermissionRoleKey(req.user.UserType)] || {});
             }
         }
     } catch (error) {

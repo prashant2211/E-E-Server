@@ -47,7 +47,7 @@ const index = async (req, res, next) => {
   const permissionsResult = await getPermissionSet(req)
   const attPerms =
     (permissionsResult.attendenceRecordModels && permissionsResult.attendenceRecordModels.split('-')) || []
-  if (!attPerms.includes('RA')) {
+  if (!attPerms.includes('RA') && !attPerms.includes('R')) {
     return res.status(403).json({
       code: 403,
       success: false,
@@ -75,6 +75,11 @@ const index = async (req, res, next) => {
         if (req.query.Date) {
             // Date can be in various formats, try to match it
             searchCondition.Date = { $regex: req.query.Date, $options: 'i' };
+        }
+
+        // Filter by Subject
+        if (req.query.Subject) {
+            searchCondition.Subject = { $regex: req.query.Subject, $options: 'i' };
         }
 
         // Filter by Section (need to check if attendance records have section info)

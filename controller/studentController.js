@@ -169,8 +169,13 @@ const attachSignedUrlsToStudent = async (student) => {
  */
 const index = async (req, res, next) => {
   const permissionsResult = await getPermissionSet(req);
-  
-  if (!permissionsResult.students.split("-").includes('RA')) {
+
+  const studentPermissions = String(permissionsResult?.students || '');
+  const studentPermissionParts = studentPermissions.split('-');
+  const canReadStudents =
+    studentPermissionParts.includes('RA') || studentPermissionParts.includes('R');
+
+  if (!canReadStudents) {
     return errorResponse(res, 'You do not have the necessary permissions to access this resource. Please contact your administrator', 403);
   }
 

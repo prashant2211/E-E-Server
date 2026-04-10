@@ -8,8 +8,10 @@ const mongoErrorMessages = require('./mongoErrors.json')
 // Get all sections for a class
 const index = async (req, res, next) => {
   const permissionsResult = await getPermissionSet(req)
+  const classPermissions = String(permissionsResult?.classes || '')
+  const classPermissionParts = classPermissions.split('-')
 
-  if (permissionsResult.classes.split('-').includes('RA')) {
+  if (classPermissionParts.includes('RA') || classPermissionParts.includes('R')) {
     try {
       const page = parseInt(req.query.PageNumber) || 1
       const limit = parseInt(req.query.PageSize) || 10

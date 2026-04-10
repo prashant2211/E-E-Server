@@ -63,6 +63,34 @@ const updateRoom = async (req, res) => {
   }
 };
 
+const deleteRoom = async (req, res) => {
+  try {
+    const roomId = req.body.roomId || req.query.roomId;
+    if (!roomId) return errorResponse(res, 'Please provide Room ID', 400);
+
+    const activeAllocation = await HostelAllocation.findOne({
+      InstutionCode: req.user.InstutionCode,
+      Room_Id: roomId,
+      Status: 'Active'
+    }).lean();
+    if (activeAllocation) {
+      return errorResponse(res, 'Cannot delete room with active allocation', 400);
+    }
+
+    const room = await HostelRoom.findOneAndUpdate(
+      { _id: roomId, InstutionCode: req.user.InstutionCode },
+      { Status: false, Updated_At: new Date() },
+      { new: true }
+    );
+    if (!room) return errorResponse(res, 'Room not found', 404);
+
+    return successResponse(res, null, 'Room deleted successfully');
+  } catch (error) {
+    logger.error('Error deleting room:', error);
+    return errorResponse(res, 'Failed to delete room', 500);
+  }
+};
+
 // Room Allocation
 const allocateRoom = async (req, res) => {
   try {
@@ -176,6 +204,27 @@ const getStudentAllocation = async (req, res) => {
   }
 };
 
+const getAllAllocations = async (req, res) => {
+  try {
+    const status = req.query.status;
+    const searchCondition = {
+      InstutionCode: req.user.InstutionCode
+    };
+    if (status) searchCondition.Status = status;
+
+    const allocations = await HostelAllocation.find(searchCondition)
+      .populate('Room_Id', 'Hostel_Name Room_Number Room_Type Floor Monthly_Rent')
+      .select('-__v')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return successResponse(res, allocations, 'Allocations retrieved successfully');
+  } catch (error) {
+    logger.error('Error fetching allocations:', error);
+    return errorResponse(res, 'Failed to fetch allocations', 500);
+  }
+};
+
 // Maintenance Management
 const createMaintenanceRequest = async (req, res) => {
   try {
@@ -260,9 +309,11 @@ module.exports = {
   getAllRooms,
   addRoom,
   updateRoom,
+  deleteRoom,
   allocateRoom,
   releaseRoom,
   getStudentAllocation,
+  getAllAllocations,
   createMaintenanceRequest,
   getAllMaintenanceRequests,
   updateMaintenanceStatus

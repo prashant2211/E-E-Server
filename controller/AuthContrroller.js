@@ -166,6 +166,18 @@ const login = async (req, res, next) => {
             .trim()
             .toLowerCase()
             .replace(/\s+/g, '');
+    const isMentorTeacherEquivalent = (expected, actual) => {
+        const e = normalizeUserType(expected);
+        const a = normalizeUserType(actual);
+        const allowed = ['mentor', 'teacher'];
+        return allowed.includes(e) && allowed.includes(a);
+    };
+    const isAccountsEquivalent = (expected, actual) => {
+        const e = normalizeUserType(expected);
+        const a = normalizeUserType(actual);
+        const allowed = ['accountant', 'accountcoordinator', 'accountscoordinator'];
+        return allowed.includes(e) && allowed.includes(a);
+    };
     try {
         const user = await User.findOne({
             $or: [
@@ -185,7 +197,9 @@ const login = async (req, res, next) => {
         if (
             user.UserType &&
             userType &&
-            normalizeUserType(user.UserType) !== normalizeUserType(userType)
+            normalizeUserType(user.UserType) !== normalizeUserType(userType) &&
+            !isMentorTeacherEquivalent(userType, user.UserType) &&
+            !isAccountsEquivalent(userType, user.UserType)
         ) {
             return res.status(401).json({
                 message: `Invalid User Type! Expected: ${userType}, Found: ${user.UserType}`,

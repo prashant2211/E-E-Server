@@ -15,7 +15,7 @@ const hasPermission = (permissionsResult, key, flag) => {
 const index = async (req, res, next) => {
     const permissionsResult = await getPermissionSet(req);
 
-    if (hasPermission(permissionsResult, 'bankDetails', 'RA')) {
+    if (hasPermission(permissionsResult, 'bankDetails', 'RA') || hasPermission(permissionsResult, 'bankDetails', 'R')) {
         try {
             const page = parseInt(req.query.PageNumber) || 1;
             const limit = parseInt(req.query.PageSize) || 10;

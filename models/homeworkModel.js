@@ -48,6 +48,7 @@ const homeworkSchema = new Schema({
   Attachments: [{
     File_Name: String,
     File_URL: String,
+    S3_Key: String,
     File_Type: String,
     File_Size: Number
   }],
@@ -94,6 +95,7 @@ const homeworkSubmissionSchema = new Schema({
   Attachments: [{
     File_Name: String,
     File_URL: String,
+    S3_Key: String,
     File_Type: String,
     File_Size: Number
   }],

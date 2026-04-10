@@ -113,6 +113,52 @@ const addDriver = async (req, res) => {
   }
 };
 
+const updateDriver = async (req, res) => {
+  try {
+    const driverId = req.body.driverId || req.body._id;
+    if (!driverId) return errorResponse(res, 'Please provide Driver ID', 400);
+    const payload = { ...req.body, Updated_At: new Date() };
+    delete payload.driverId;
+    delete payload._id;
+
+    const driver = await Driver.findOneAndUpdate(
+      { _id: driverId, InstutionCode: req.user.InstutionCode },
+      payload,
+      { new: true }
+    ).select('-__v');
+
+    if (!driver) return errorResponse(res, 'Driver not found', 404);
+    return successResponse(res, driver, 'Driver updated successfully');
+  } catch (error) {
+    logger.error('Error updating driver:', error);
+    return errorResponse(res, 'Failed to update driver', 500);
+  }
+};
+
+const deleteDriver = async (req, res) => {
+  try {
+    const driverId = req.body.driverId || req.query.driverId;
+    if (!driverId) return errorResponse(res, 'Please provide Driver ID', 400);
+
+    const driver = await Driver.findOneAndUpdate(
+      { _id: driverId, InstutionCode: req.user.InstutionCode },
+      { Status: false, Updated_At: new Date() },
+      { new: true }
+    );
+    if (!driver) return errorResponse(res, 'Driver not found', 404);
+
+    await Vehicle.updateMany(
+      { InstutionCode: req.user.InstutionCode, Driver_Id: driverId, Status: true },
+      { $unset: { Driver_Id: 1 }, Updated_At: new Date() }
+    );
+
+    return successResponse(res, null, 'Driver deleted successfully');
+  } catch (error) {
+    logger.error('Error deleting driver:', error);
+    return errorResponse(res, 'Failed to delete driver', 500);
+  }
+};
+
 // Route Management
 const getAllRoutes = async (req, res) => {
   try {
@@ -137,6 +183,57 @@ const addRoute = async (req, res) => {
   } catch (error) {
     logger.error('Error adding route:', error);
     return errorResponse(res, 'Failed to add route', 500);
+  }
+};
+
+const updateRoute = async (req, res) => {
+  try {
+    const routeId = req.body.routeId || req.body._id;
+    if (!routeId) return errorResponse(res, 'Please provide Route ID', 400);
+    const payload = { ...req.body, Updated_At: new Date() };
+    delete payload.routeId;
+    delete payload._id;
+
+    const route = await TransportRoute.findOneAndUpdate(
+      { _id: routeId, InstutionCode: req.user.InstutionCode },
+      payload,
+      { new: true }
+    ).select('-__v');
+
+    if (!route) return errorResponse(res, 'Route not found', 404);
+    return successResponse(res, route, 'Route updated successfully');
+  } catch (error) {
+    logger.error('Error updating route:', error);
+    return errorResponse(res, 'Failed to update route', 500);
+  }
+};
+
+const deleteRoute = async (req, res) => {
+  try {
+    const routeId = req.body.routeId || req.query.routeId;
+    if (!routeId) return errorResponse(res, 'Please provide Route ID', 400);
+
+    const route = await TransportRoute.findOneAndUpdate(
+      { _id: routeId, InstutionCode: req.user.InstutionCode },
+      { Status: false, Updated_At: new Date() },
+      { new: true }
+    );
+    if (!route) return errorResponse(res, 'Route not found', 404);
+
+    await Vehicle.updateMany(
+      { InstutionCode: req.user.InstutionCode, Route_Id: routeId, Status: true },
+      { $unset: { Route_Id: 1 }, Updated_At: new Date() }
+    );
+
+    await StudentTransport.updateMany(
+      { InstutionCode: req.user.InstutionCode, Route_Id: routeId, Status: true },
+      { Status: false, End_Date: new Date(), Updated_At: new Date() }
+    );
+
+    return successResponse(res, null, 'Route deleted successfully');
+  } catch (error) {
+    logger.error('Error deleting route:', error);
+    return errorResponse(res, 'Failed to delete route', 500);
   }
 };
 
@@ -205,6 +302,69 @@ const getStudentTransport = async (req, res) => {
   }
 };
 
+const getAllStudentTransport = async (req, res) => {
+  try {
+    const assignments = await StudentTransport.find({
+      InstutionCode: req.user.InstutionCode,
+      Status: true
+    })
+      .populate('Route_Id', 'Route_Name Route_Number')
+      .populate('Vehicle_Id', 'Vehicle_Number Vehicle_Type Capacity')
+      .select('-__v')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    return successResponse(res, assignments, 'Student transport assignments retrieved successfully');
+  } catch (error) {
+    logger.error('Error fetching all student transport assignments:', error);
+    return errorResponse(res, 'Failed to fetch student transport assignments', 500);
+  }
+};
+
+const updateStudentTransport = async (req, res) => {
+  try {
+    const assignmentId = req.body.assignmentId || req.body._id;
+    if (!assignmentId) return errorResponse(res, 'Please provide assignment ID', 400);
+    const payload = { ...req.body, Updated_At: new Date() };
+    delete payload.assignmentId;
+    delete payload._id;
+
+    const assignment = await StudentTransport.findOneAndUpdate(
+      { _id: assignmentId, InstutionCode: req.user.InstutionCode, Status: true },
+      payload,
+      { new: true }
+    )
+      .populate('Route_Id', 'Route_Name Route_Number')
+      .populate('Vehicle_Id', 'Vehicle_Number Vehicle_Type Capacity')
+      .select('-__v');
+
+    if (!assignment) return errorResponse(res, 'Transport assignment not found', 404);
+    return successResponse(res, assignment, 'Transport assignment updated successfully');
+  } catch (error) {
+    logger.error('Error updating student transport assignment:', error);
+    return errorResponse(res, 'Failed to update student transport assignment', 500);
+  }
+};
+
+const removeStudentTransport = async (req, res) => {
+  try {
+    const assignmentId = req.body.assignmentId || req.query.assignmentId;
+    if (!assignmentId) return errorResponse(res, 'Please provide assignment ID', 400);
+
+    const assignment = await StudentTransport.findOneAndUpdate(
+      { _id: assignmentId, InstutionCode: req.user.InstutionCode, Status: true },
+      { Status: false, End_Date: new Date(), Updated_At: new Date() },
+      { new: true }
+    );
+
+    if (!assignment) return errorResponse(res, 'Transport assignment not found', 404);
+    return successResponse(res, null, 'Transport assignment removed successfully');
+  } catch (error) {
+    logger.error('Error removing student transport assignment:', error);
+    return errorResponse(res, 'Failed to remove student transport assignment', 500);
+  }
+};
+
 module.exports = {
   getAllVehicles,
   addVehicle,
@@ -212,9 +372,16 @@ module.exports = {
   deleteVehicle,
   getAllDrivers,
   addDriver,
+  updateDriver,
+  deleteDriver,
   getAllRoutes,
   addRoute,
+  updateRoute,
+  deleteRoute,
   assignStudentTransport,
-  getStudentTransport
+  getStudentTransport,
+  getAllStudentTransport,
+  updateStudentTransport,
+  removeStudentTransport
 };
 
