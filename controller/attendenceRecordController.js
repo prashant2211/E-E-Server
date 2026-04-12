@@ -6,6 +6,7 @@ const studentModel         = require('../models/studentModel')
 const StudentEnrollment    = require('../models/studentEnrollmentModel')
 const mongoErrorMessages = require('./mongoErrors.json');
 const { AcademicYear } = require('../models/academicYearModel')
+const { resolveOwnStudentRegistration } = require('../utils/studentPortalAccess')
 
 // Helper to safely parse attendance status
 const isPresent = (val) => {
@@ -373,8 +374,17 @@ const getStudentAttendance = async (req, res, next) => {
       (permissionsResult.attendenceRecordModels && permissionsResult.attendenceRecordModels.split('-')) || []
     if(attPermsStudent.includes('R')){
         try {
-            const studentId = req.query.StudentId || req.query.RegistrationNumber;
-            
+            const rawStudentId = req.query.StudentId || req.query.RegistrationNumber;
+            const resolved = resolveOwnStudentRegistration(req, rawStudentId);
+            if (resolved.error) {
+                return res.status(resolved.error.status).json({
+                    success: false,
+                    code: resolved.error.status,
+                    message: resolved.error.message
+                });
+            }
+            const studentId = resolved.registrationNumber;
+
             if (!studentId) {
                 return res.status(400).json({
                     success: false,
@@ -565,7 +575,16 @@ const getStudentAttendanceSummary = async (req, res, next) => {
             })
         }
 
-        const studentId = req.query.StudentId || req.query.RegistrationNumber
+        const rawStudentId = req.query.StudentId || req.query.RegistrationNumber
+        const resolved = resolveOwnStudentRegistration(req, rawStudentId)
+        if (resolved.error) {
+            return res.status(resolved.error.status).json({
+                success: false,
+                code: resolved.error.status,
+                message: resolved.error.message
+            })
+        }
+        const studentId = resolved.registrationNumber
         if (!studentId) {
             return res.status(400).json({
                 success: false,

@@ -7,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const mongoErrorMessages = require('./mongoErrors.json');
 const folderStr = require('./DocumentFolder.json');
 const { logger } = require('../utils/logger');
+const { resolveOwnStudentRegistration } = require('../utils/studentPortalAccess');
 const { successResponse, errorResponse, paginatedResponse } = require('../utils/response');
 const { cache } = require('../utils/cache');
 const AWS = require('aws-sdk');
@@ -416,7 +417,11 @@ const getStudentByRegisterationNumber = async (req, res, next) => {
  */
 const getStudentProfile = async (req, res, next) => {
   try {
-    const registrationNumber = req.query.registrationNumber;
+    const resolved = resolveOwnStudentRegistration(req, req.query.registrationNumber);
+    if (resolved.error) {
+      return errorResponse(res, resolved.error.message, resolved.error.status);
+    }
+    const registrationNumber = resolved.registrationNumber;
 
     if (!registrationNumber) {
       return errorResponse(res, 'Please provide Registration Number', 400);
@@ -426,6 +431,7 @@ const getStudentProfile = async (req, res, next) => {
     const cached = cache.get(cacheKey);
 
     if (cached) {
+      await attachSignedUrlsToStudent(cached);
       return successResponse(res, cached, 'Student profile retrieved successfully');
     }
 
@@ -451,6 +457,8 @@ const getStudentProfile = async (req, res, next) => {
       ...student,
       ClassDetails: classDetails
     };
+
+    await attachSignedUrlsToStudent(profile);
 
     cache.set(cacheKey, profile, 300);
 

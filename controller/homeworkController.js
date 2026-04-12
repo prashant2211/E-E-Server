@@ -4,6 +4,7 @@ const { successResponse, errorResponse, paginatedResponse } = require('../utils/
 const { cache } = require('../utils/cache');
 const AWS = require('aws-sdk');
 const mongoose = require('mongoose');
+const { resolveOwnStudentRegistration } = require('../utils/studentPortalAccess');
 
 const ACCESS_KEY = process.env.ACCESS_KEY;
 const SECRET_ACCESS_KEY = process.env.SECRET_ACCESS_KEY;
@@ -437,7 +438,11 @@ const gradeHomework = async (req, res) => {
 
 const getStudentSubmissions = async (req, res) => {
   try {
-    const registrationNumber = req.query.registrationNumber;
+    const resolved = resolveOwnStudentRegistration(req, req.query.registrationNumber);
+    if (resolved.error) {
+      return errorResponse(res, resolved.error.message, resolved.error.status);
+    }
+    const registrationNumber = resolved.registrationNumber;
     const homeworkId = req.query.homeworkId;
 
     if (!registrationNumber) {

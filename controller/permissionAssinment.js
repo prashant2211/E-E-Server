@@ -228,6 +228,10 @@ const data = {
     TC: "R",
     notifications:"R-W-E-D-RA",
     studentMarksheet: "R-RA",
+    feePayment: "R",
+    feeStructure: "R",
+    /** Read-only: school UPI / bank shown on student fee payment screen */
+    bankDetails: "R",
   },
   /** Parent portal: align read access with Student so attendance/marks APIs work */
   Parent: {
@@ -248,6 +252,7 @@ const data = {
     TC: "R",
     notifications: "R",
     studentMarksheet: "R-RA",
+    bankDetails: "R",
   },
   "Accounts Coordinator": {
     students: "R",

@@ -295,7 +295,58 @@ const onboardSchool = async (req, res) => {
   session.startTransaction();
 
   try {
-    const data = req.body;
+    const raw = req.body || {};
+    const adminName = String(raw.adminName || '').trim();
+    const nameParts = adminName.split(/\s+/).filter(Boolean);
+    const fallbackFirstName = nameParts[0] || '';
+    const fallbackLastName = nameParts.slice(1).join(' ') || '';
+
+    const pickFirstNonEmpty = (obj, keys) => {
+      for (const k of keys) {
+        const v = obj[k];
+        if (v != null && String(v).trim() !== '') return String(v).trim();
+      }
+      return '';
+    };
+
+    const stateFromAliases = pickFirstNonEmpty(raw, ['state', 'stateName', 'province', 'region']);
+    const districtFromAliases = pickFirstNonEmpty(raw, ['district', 'districtName', 'city', 'county']);
+    const addressFromAliases = pickFirstNonEmpty(raw, [
+      'address',
+      'fullAddress',
+      'street',
+      'postalAddress',
+      'location',
+    ]);
+
+    // Backward-compatible payload normalization for old onboarding clients
+    const data = {
+      ...raw,
+      email: raw.email || raw.institutionEmail || '',
+      contactNumber: raw.contactNumber || raw.institutionPhone || raw.phone || '',
+      adminFirstName: raw.adminFirstName || fallbackFirstName,
+      adminLastName: raw.adminLastName || fallbackLastName,
+      adminEmail: raw.adminEmail || raw.adminUsername || '',
+      adminPhone: raw.adminPhone || raw.contactNumber || raw.institutionPhone || '',
+      state: stateFromAliases,
+      district: districtFromAliases,
+      address: addressFromAliases,
+    };
+
+    const stateOk = data.state.trim().length >= 2;
+    const districtOk = data.district.trim().length >= 2;
+    const addressOk = data.address.trim().length >= 10;
+    const legacyInstitutionPayload =
+      !!(raw.institutionName && (raw.institutionEmail || raw.email)) &&
+      !stateOk &&
+      !districtOk &&
+      !addressOk;
+
+    if (legacyInstitutionPayload) {
+      data.state = 'Pending';
+      data.district = 'Pending';
+      data.address = 'Address pending update by school admin.';
+    }
 
     // Validate input data
     const validationErrors = validateOnboardingData(data);
@@ -340,6 +391,13 @@ const onboardSchool = async (req, res) => {
     // Generate Institution ID
     const institutionId = await generateInstitutionId(data.institutionName);
 
+    const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
+    const customInstitutionUrl = String(data.institutionUrl || '').trim();
+    // Url is unique in DB; default login URL must differ per institution
+    const institutionPortalUrl =
+      customInstitutionUrl ||
+      `${frontendBase}/login?institution=${encodeURIComponent(institutionId)}`;
+
     // Create Institution
     const institution = new Institution({
       Instution_Id: institutionId,
@@ -357,7 +415,7 @@ const onboardSchool = async (req, res) => {
       Registar_Name: data.registrarName || '',
       instution_Type: data.institutionType || 'School',
       Management_Member: data.managementMembers && data.managementMembers.length > 0 ? data.managementMembers : ['System Admin'],
-      Url: data.institutionUrl || `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`,
+      Url: institutionPortalUrl,
       Status: true
     });
 
@@ -427,7 +485,7 @@ const onboardSchool = async (req, res) => {
     session.endSession();
 
     // Send welcome email (non-blocking)
-    const loginUrl = data.institutionUrl || `${process.env.FRONTEND_URL || 'http://localhost:3000'}/login`;
+    const loginUrl = institutionPortalUrl;
     sendWelcomeEmail(
       {
         firstName: data.adminFirstName,

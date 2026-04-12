@@ -90,6 +90,40 @@ const feePaymentSchema = new Schema(
     Status: {
       type: String, // Success, Pending, Failed
     },
+    /** Student-initiated UPI/online payments awaiting staff verification */
+    VerificationStatus: {
+      type: String,
+      default: '',
+      index: true,
+    },
+    StudentSubmittedPayment: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    ProofImageKey: {
+      type: String,
+      default: '',
+    },
+    ProofImageUrl: {
+      type: String,
+      default: '',
+    },
+    VerifiedAt: {
+      type: Date,
+    },
+    VerifiedByName: {
+      type: String,
+      default: '',
+    },
+    VerifiedByMemberId: {
+      type: String,
+      default: '',
+    },
+    RejectionReason: {
+      type: String,
+      default: '',
+    },
   },
   { timestamps: true }
 )

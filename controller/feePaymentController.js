@@ -1,9 +1,86 @@
+const path = require('path')
 const { response } = require('express')
 const feePaymentModel = require('../models/feePaymentModel')
 const feeStructureModel = require('../models/feeStructureModel')
 const studentModel = require('../models/studentModel')
 const admissionModel = require('../models/admissionModel')
 const { resolveAcademicYearScope } = require('../utils/academicYearScope')
+const { resolveOwnStudentRegistration } = require('../utils/studentPortalAccess')
+const { getPermissionSet } = require('./permissionAssinment')
+const AWS = require('aws-sdk')
+
+const ACCESS_KEY = process.env.ACCESS_KEY
+const SECRET_ACCESS_KEY = process.env.SECRET_ACCESS_KEY
+const BUCKET_NAME = process.env.BUCKET_NAME
+const AWS_REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || 'ap-southeast-2'
+
+const s3 =
+  ACCESS_KEY && SECRET_ACCESS_KEY && BUCKET_NAME
+    ? new AWS.S3({
+        accessKeyId: ACCESS_KEY,
+        secretAccessKey: SECRET_ACCESS_KEY,
+        region: AWS_REGION,
+      })
+    : null
+
+const uploadFeeProofToS3 = async (buffer, key, contentType) => {
+  if (!s3) {
+    throw new Error('S3 configuration missing (ACCESS_KEY, SECRET_ACCESS_KEY, BUCKET_NAME)')
+  }
+  return s3
+    .upload({
+      Bucket: BUCKET_NAME,
+      Key: key,
+      Body: buffer,
+      ContentType: contentType || 'application/octet-stream',
+    })
+    .promise()
+}
+
+const getFeeProofSignedUrl = async (key) => {
+  if (!s3 || !key || !BUCKET_NAME) return null
+  try {
+    return await s3.getSignedUrlPromise('getObject', {
+      Bucket: BUCKET_NAME,
+      Key: key,
+      Expires: 3600,
+    })
+  } catch {
+    return null
+  }
+}
+
+/** S3-safe segment for proof object names: InstitutionCode_StudentRegistrationNumber_fileName */
+const sanitizeProofNamePart = (value, maxLen) => {
+  const s = String(value ?? '')
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+  const out = s.substring(0, maxLen)
+  return out || 'NA'
+}
+
+const attachProofSignedUrls = async (rows) => {
+  const list = Array.isArray(rows) ? rows : []
+  for (const row of list) {
+    if (row && row.ProofImageKey) {
+      row.ProofSignedUrl = await getFeeProofSignedUrl(row.ProofImageKey)
+    }
+  }
+  return list
+}
+
+const feePaymentWriteAllowed = (permissionsResult) => {
+  const raw = String(permissionsResult?.feePayment || '')
+  const parts = raw.split('-')
+  return parts.includes('W') || parts.includes('E')
+}
+
+const feePaymentReadAllowed = (permissionsResult) => {
+  const raw = String(permissionsResult?.feePayment || '')
+  const parts = raw.split('-')
+  return parts.includes('R') || parts.includes('RA') || parts.includes('W') || parts.includes('E')
+}
 
 // Helper: safe number parsing
 const toAmount = (val) => {
@@ -172,24 +249,47 @@ const store = async (req, res, next) => {
 
 const show = async (req, res, next) => {
   try {
+    const resolved = resolveOwnStudentRegistration(req, req.query.StudentId)
+    if (resolved.error) {
+      return res.status(resolved.error.status).json({
+        success: false,
+        code: resolved.error.status,
+        message: resolved.error.message,
+      })
+    }
+    const studentIdForQuery = resolved.registrationNumber
+    if (!studentIdForQuery) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'StudentId is required',
+      })
+    }
+
     const scope = await resolveAcademicYearScope(req)
     const createdAtRange = scope ? { $gte: scope.from, $lte: scope.to } : null
     let feePatmentRecord
     if (req.query.Date) {
-      feePatmentRecord = await feePaymentModel.find({
-        InstutionId: req.user.InstutionCode,
-        StudentId: req.query.StudentId,
-        Date: req.query.Date,
-        ...(createdAtRange ? { createdAt: createdAtRange } : {}),
-      })
+      feePatmentRecord = await feePaymentModel
+        .find({
+          InstutionId: req.user.InstutionCode,
+          StudentId: studentIdForQuery,
+          Date: req.query.Date,
+          ...(createdAtRange ? { createdAt: createdAtRange } : {}),
+        })
+        .lean()
     }
     if (!req.query.Date) {
-      feePatmentRecord = await feePaymentModel.find({
-        InstutionId: req.user.InstutionCode,
-        ...(createdAtRange ? { createdAt: createdAtRange } : {}),
-        StudentId: req.query.StudentId,
-      })
+      feePatmentRecord = await feePaymentModel
+        .find({
+          InstutionId: req.user.InstutionCode,
+          ...(createdAtRange ? { createdAt: createdAtRange } : {}),
+          StudentId: studentIdForQuery,
+        })
+        .lean()
     }
+
+    await attachProofSignedUrls(feePatmentRecord)
 
     res.status(200).json({
       success: true,
@@ -212,18 +312,24 @@ const showAllPayment = async (req, res, next) => {
     const createdAtRange = scope ? { $gte: scope.from, $lte: scope.to } : null
     let feePatmentRecord
     if (req.query.Date) {
-      feePatmentRecord = await feePaymentModel.find({
-        InstutionId: req.user.InstutionCode,
-        Date: req.query.Date,
-        ...(createdAtRange ? { createdAt: createdAtRange } : {}),
-      })
+      feePatmentRecord = await feePaymentModel
+        .find({
+          InstutionId: req.user.InstutionCode,
+          Date: req.query.Date,
+          ...(createdAtRange ? { createdAt: createdAtRange } : {}),
+        })
+        .lean()
     }
     if (!req.query.Date) {
-      feePatmentRecord = await feePaymentModel.find({
-        InstutionId: req.user.InstutionCode,
-        ...(createdAtRange ? { createdAt: createdAtRange } : {}),
-      })
+      feePatmentRecord = await feePaymentModel
+        .find({
+          InstutionId: req.user.InstutionCode,
+          ...(createdAtRange ? { createdAt: createdAtRange } : {}),
+        })
+        .lean()
     }
+
+    await attachProofSignedUrls(feePatmentRecord)
 
     res.status(200).json({
       success: true,
@@ -455,7 +561,15 @@ const getStudentSummary = async (req, res, next) => {
       })
     }
 
-    const { studentId } = req.query
+    const resolved = resolveOwnStudentRegistration(req, req.query.studentId)
+    if (resolved.error) {
+      return res.status(resolved.error.status).json({
+        success: false,
+        code: resolved.error.status,
+        message: resolved.error.message,
+      })
+    }
+    const studentId = resolved.registrationNumber
 
     if (!studentId) {
       return res.status(400).json({
@@ -485,9 +599,21 @@ const getStudentSummary = async (req, res, next) => {
       })
       .sort({ createdAt: -1 })
 
+    const countsTowardPaid = (p) =>
+      p.Status === 'Success' &&
+      (!p.VerificationStatus ||
+        p.VerificationStatus === '' ||
+        p.VerificationStatus === 'Approved')
+
     let totalPaid = 0
+    let pendingVerificationTotal = 0
     payments.forEach((p) => {
-      totalPaid += toAmount(p.PaidAmount)
+      if (countsTowardPaid(p)) {
+        totalPaid += toAmount(p.PaidAmount)
+      }
+      if (p.VerificationStatus === 'Pending' && p.StudentSubmittedPayment) {
+        pendingVerificationTotal += toAmount(p.PaidAmount)
+      }
     })
     const pending = toAmount(student.OutstandingAmount)
 
@@ -505,6 +631,7 @@ const getStudentSummary = async (req, res, next) => {
         summary: {
           totalPaid,
           pending,
+          pendingVerificationTotal,
         },
         payments,
       },
@@ -697,6 +824,342 @@ const storeAdmissionFee = async (req, res) => {
   }
 }
 
+/**
+ * Student submits UPI / QR / online bank payment for staff verification (does not reduce outstanding until approved).
+ */
+const studentSubmitPayment = async (req, res) => {
+  try {
+    const userType = String(req.user?.UserType || '').trim()
+    if (userType !== 'Student') {
+      return res.status(403).json({
+        success: false,
+        code: 403,
+        message: 'Only student accounts can submit payments through this flow.',
+      })
+    }
+
+    const resolved = resolveOwnStudentRegistration(req, req.body.StudentId)
+    if (resolved.error) {
+      return res.status(resolved.error.status).json({
+        success: false,
+        code: resolved.error.status,
+        message: resolved.error.message,
+      })
+    }
+    const registrationNumber = resolved.registrationNumber
+    const instutionId = req.user.InstutionCode
+
+    const PaidAmountRaw = req.body.PaidAmount ?? req.body.paidAmount
+    const paid = toAmount(PaidAmountRaw)
+    if (paid <= 0) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'Paid amount must be greater than zero',
+      })
+    }
+
+    const PaymentMode = String(req.body.PaymentMode || '').trim()
+    const allowedModes = ['QR', 'OnlineBankTransfer', 'NetBanking', 'Card']
+    if (!allowedModes.includes(PaymentMode)) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: `PaymentMode must be one of: ${allowedModes.join(', ')}`,
+      })
+    }
+
+    const PaymentReference = String(req.body.PaymentReference || '').trim()
+    if (!PaymentReference) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'Payment reference or UPI transaction ID is required',
+      })
+    }
+
+    const student = await studentModel.findOne({
+      InstutionCode: instutionId,
+      Registration_Number: registrationNumber,
+    })
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        code: 404,
+        message: 'Student not found',
+      })
+    }
+
+    const scope = await resolveAcademicYearScope(req)
+    const academicYearName = scope?.yearDoc?.Year_Name || req.body.AcademicYear || ''
+
+    const Class = student.Class || req.body.Class || ''
+    if (!Class) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'Student class is missing; contact the school to update your profile.',
+      })
+    }
+
+    let baseStructure = await feeStructureModel.findOne({
+      InstutionId: instutionId,
+      Class: Class,
+    })
+
+    const baseTution = baseStructure ? toAmount(baseStructure.TutionFee) : 0
+    const baseLibrary = baseStructure ? toAmount(baseStructure.LibraryFee) : 0
+    const baseActivity = baseStructure ? toAmount(baseStructure.ActivityFee) : 0
+    const baseExam = baseStructure ? toAmount(baseStructure.ExamFee) : 0
+    const baseUniform = baseStructure ? toAmount(baseStructure.UniformFee) : 0
+    const baseProspectus = baseStructure ? toAmount(baseStructure.ProspectusFee) : 0
+    const baseTransport = baseStructure ? toAmount(baseStructure.TransportFee) : 0
+    const baseOther = baseStructure ? toAmount(baseStructure.OtherFee) : 0
+
+    const currentDate = new Date()
+    const date = currentDate.toLocaleDateString()
+    const time = currentDate.toLocaleTimeString()
+    const FeeType = String(req.body.FeeType || 'Fee payment').trim()
+    const Month = String(req.body.Month || '').trim()
+
+    let proofKey = ''
+    let proofUrl = ''
+    if (req.file && req.file.buffer) {
+      const rawExt = path.extname(req.file.originalname || '')
+      const safeExt =
+        rawExt && rawExt.length <= 10 && /^\.[a-zA-Z0-9.]+$/.test(rawExt)
+          ? rawExt.toLowerCase()
+          : '.jpg'
+      const stem = path.basename(req.file.originalname || `proof${safeExt}`, rawExt || safeExt)
+      const safeStem = sanitizeProofNamePart(stem, 100)
+      const safeInst = sanitizeProofNamePart(instutionId, 60)
+      const safeReg = sanitizeProofNamePart(registrationNumber, 60)
+      // S3 object basename: InstitutionCode_StudentRegistrationNumber_<originalStem>_<ms>.ext (unique, matches naming request)
+      const objectBase = `${safeInst}_${safeReg}_${safeStem}_${Date.now()}${safeExt}`
+      const key = `${instutionId}/FeePaymentProof/${objectBase}`
+      const uploaded = await uploadFeeProofToS3(req.file.buffer, key, req.file.mimetype)
+      proofKey = uploaded.Key
+      proofUrl = uploaded.Location || ''
+    }
+
+    const outstandingSnapshot = toAmount(student.OutstandingAmount)
+
+    const feePatment = new feePaymentModel({
+      InstutionId: instutionId,
+      StudentId: registrationNumber,
+      StudentName: `${student.First_Name || ''} ${student.Last_Name || ''}`.trim(),
+      Class,
+      TutionFee: baseTution.toString(),
+      LibraryFee: baseLibrary.toString(),
+      ActivityFee: baseActivity.toString(),
+      ExamFee: baseExam.toString(),
+      UniformFee: baseUniform.toString(),
+      ProspectusFee: baseProspectus.toString(),
+      TransportFee: baseTransport.toString(),
+      OtherFee: baseOther.toString(),
+      PaidAmount: paid.toString(),
+      PendingAmount: outstandingSnapshot.toString(),
+      ScholarshipAmount: '0',
+      ConcessionAmount: '0',
+      Month,
+      AcademicYear: academicYearName,
+      FeeType,
+      PaymentMode,
+      PaymentReference,
+      Date: date,
+      Time: time,
+      Status: 'Pending',
+      VerificationStatus: 'Pending',
+      StudentSubmittedPayment: true,
+      ProofImageKey: proofKey,
+      ProofImageUrl: proofUrl,
+    })
+
+    await feePatment.save()
+
+    return res.status(201).json({
+      code: 201,
+      success: true,
+      message:
+        'Payment submitted for verification. Your outstanding balance will update after the school approves this payment.',
+      data: feePatment,
+    })
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+      code: 500,
+    })
+  }
+}
+
+const listPendingStudentPayments = async (req, res) => {
+  try {
+    const permissionsResult = await getPermissionSet(req)
+    if (!feePaymentReadAllowed(permissionsResult)) {
+      return res.status(403).json({
+        success: false,
+        code: 403,
+        message:
+          'You do not have permission to view fee payments. Please contact your administrator.',
+      })
+    }
+
+    const instutionId = req.user?.InstutionCode
+    if (!instutionId) {
+      return res.status(401).json({
+        success: false,
+        code: 401,
+        message: 'Institution context not found',
+      })
+    }
+
+    const rows = await feePaymentModel
+      .find({
+        InstutionId: instutionId,
+        VerificationStatus: 'Pending',
+        StudentSubmittedPayment: true,
+      })
+      .sort({ createdAt: -1 })
+      .lean()
+
+    await attachProofSignedUrls(rows)
+
+    return res.status(200).json({
+      success: true,
+      code: 200,
+      message: 'Pending student payments retrieved successfully',
+      data: rows,
+    })
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+      code: 500,
+    })
+  }
+}
+
+const verifyStudentPayment = async (req, res) => {
+  try {
+    const permissionsResult = await getPermissionSet(req)
+    if (!feePaymentWriteAllowed(permissionsResult)) {
+      return res.status(403).json({
+        success: false,
+        code: 403,
+        message:
+          'You do not have permission to verify fee payments. Please contact your administrator.',
+      })
+    }
+
+    const instutionId = req.user?.InstutionCode
+    if (!instutionId) {
+      return res.status(401).json({
+        success: false,
+        code: 401,
+        message: 'Institution context not found',
+      })
+    }
+
+    const { paymentId, action, rejectionReason } = req.body
+    if (!paymentId) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'paymentId is required',
+      })
+    }
+
+    const act = String(action || '').toLowerCase()
+    if (act !== 'approve' && act !== 'reject') {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'action must be approve or reject',
+      })
+    }
+
+    const payment = await feePaymentModel.findOne({
+      _id: paymentId,
+      InstutionId: instutionId,
+    })
+    if (!payment) {
+      return res.status(404).json({
+        success: false,
+        code: 404,
+        message: 'Payment record not found',
+      })
+    }
+
+    if (payment.VerificationStatus !== 'Pending' || !payment.StudentSubmittedPayment) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'This payment is not awaiting verification',
+      })
+    }
+
+    const verifierName = `${req.user.FirstName || ''} ${req.user.LastName || ''}`.trim()
+
+    if (act === 'reject') {
+      payment.VerificationStatus = 'Rejected'
+      payment.Status = 'Failed'
+      payment.RejectionReason = String(rejectionReason || '').trim()
+      payment.VerifiedAt = new Date()
+      payment.VerifiedByName = verifierName
+      payment.VerifiedByMemberId = String(req.user.MemberId || '')
+      await payment.save()
+      return res.status(200).json({
+        success: true,
+        code: 200,
+        message: 'Payment rejected',
+        data: payment,
+      })
+    }
+
+    const student = await studentModel.findOne({
+      InstutionCode: instutionId,
+      Registration_Number: payment.StudentId,
+    })
+    if (!student) {
+      return res.status(404).json({
+        success: false,
+        code: 404,
+        message: 'Student not found for this payment',
+      })
+    }
+
+    const paid = toAmount(payment.PaidAmount)
+    const currentOutstanding = toAmount(student.OutstandingAmount)
+    const newOutstanding = Math.max(0, currentOutstanding - paid)
+
+    student.OutstandingAmount = newOutstanding.toString()
+    await student.save()
+
+    payment.PendingAmount = newOutstanding.toString()
+    payment.Status = 'Success'
+    payment.VerificationStatus = 'Approved'
+    payment.VerifiedAt = new Date()
+    payment.VerifiedByName = verifierName
+    payment.VerifiedByMemberId = String(req.user.MemberId || '')
+    payment.RejectionReason = ''
+    await payment.save()
+
+    return res.status(200).json({
+      success: true,
+      code: 200,
+      message: 'Payment approved and student outstanding updated',
+      data: payment,
+    })
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+      code: 500,
+    })
+  }
+}
+
 module.exports = {
   store,
   show,
@@ -705,5 +1168,8 @@ module.exports = {
   getClassPendingList,
   getStudentSummary,
   storeAdmissionFee,
+  studentSubmitPayment,
+  listPendingStudentPayments,
+  verifyStudentPayment,
 }
 

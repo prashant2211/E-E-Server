@@ -3,6 +3,7 @@ const studentMarksheetModel      = require('../models/studentMarksheetModel')
 const mongoErrorMessages = require('./mongoErrors.json');
 const { resolveAcademicYearScope } = require('../utils/academicYearScope')
 const StudentEnrollment = require('../models/studentEnrollmentModel')
+const { resolveOwnStudentRegistration } = require('../utils/studentPortalAccess')
 
 //Show all fee Detiails
 
@@ -431,12 +432,31 @@ const getMarks = async (req, res, next) => {
 const getStudentMarks = async (req, res, next) => {
 
     try{
+    const resolved = resolveOwnStudentRegistration(req, req.query.registrationNumber)
+    if (resolved.error) {
+        return res.status(resolved.error.status).json({
+            success: false,
+            code: resolved.error.status,
+            message: resolved.error.message
+        })
+    }
+    const regNum = resolved.registrationNumber
+    if (!regNum) {
+        return res.status(400).json({
+            success: false,
+            code: 400,
+            message: 'registrationNumber is required'
+        })
+    }
+
     const scope = await resolveAcademicYearScope(req)
     const createdAtRange = scope?.from && scope?.to ? { $gte: scope.from, $lte: scope.to } : null;
 
+    const isStudentUser = String(req.user?.UserType || '').trim() === 'Student'
     const studentmarks = await studentMarksheetModel.find({
-        Student_Id: req.query.registrationNumber,
+        Student_Id: regNum,
         Instution_Id: req.user.InstutionCode,
+        ...(isStudentUser ? { Publish: true } : {}),
         ...(createdAtRange ? { createdAt: createdAtRange } : {}),
     })
 
