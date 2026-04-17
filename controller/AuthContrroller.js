@@ -157,8 +157,36 @@ const register = async (req, res, next) => {
    
 }
 
+/** Escape a string for safe use inside RegExp (Mongo $regex). */
+function escapeRegex(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Match login identifier against Email (case-insensitive), Phone (exact), UserName (case-insensitive).
+ * MongoDB equality is case-sensitive; emails often differ only by case in the wild.
+ */
+function buildCredentialMatch(rawUsername) {
+    const u = String(rawUsername || '')
+        .trim()
+        .replace(/\u200B/g, '');
+    if (!u) {
+        return null;
+    }
+    const emailOrUserRegex = new RegExp(`^${escapeRegex(u)}$`, 'i');
+    return {
+        $or: [
+            { Email: emailOrUserRegex },
+            { Phone: u },
+            { UserName: emailOrUserRegex },
+        ],
+    };
+}
+
 const login = async (req, res, next) => {
-    const username = req.body.username || req.body.email;
+    const username = String(req.body.username || req.body.email || '')
+        .trim()
+        .replace(/\u200B/g, '');
     const password = req.body.password;
     const userType = req.body.userType || req.body.UserType;
     const normalizeUserType = (value) =>
@@ -179,13 +207,36 @@ const login = async (req, res, next) => {
         return allowed.includes(e) && allowed.includes(a);
     };
     try {
-        const user = await User.findOne({
-            $or: [
-                { Email: username },
-                { Phone: username },
-                { UserName: username }
-            ],
-        });
+        const requestedUserType = normalizeUserType(userType);
+        // SuperAdmin users are stored with InstutionCode like SYSTEM, not a school tenant.
+        // Do not scope by institution for super-admin login (body/header would be EES-001 from web/mobile).
+        const isSuperAdminLogin = requestedUserType === 'superadmin';
+        let rawInstitution = '';
+        if (!isSuperAdminLogin) {
+            rawInstitution =
+                req.body.InstutionCode ||
+                req.body.InstitutionCode ||
+                req.headers['x-target-institution-code'];
+        }
+        const institutionCode = String(rawInstitution || '').trim();
+        const credentialMatch = buildCredentialMatch(username);
+        if (!credentialMatch) {
+            return res.status(401).json({
+                message: 'Invalid credentials',
+                success: false,
+                code: 401,
+            });
+        }
+        const userQuery = institutionCode
+            ? { $and: [credentialMatch, { InstutionCode: institutionCode }] }
+            : credentialMatch;
+        let user = await User.findOne(userQuery);
+
+        // Tenant-scoped lookup can miss Super Admin (SYSTEM) and other non-matching codes when
+        // the client sends default school code (EES-001) from env/header. Retry once without filter.
+        if (!user && institutionCode) {
+            user = await User.findOne(credentialMatch);
+        }
 
         if (!user) {
             return res.status(401).json({
@@ -209,7 +260,21 @@ const login = async (req, res, next) => {
             });
         }
 
-        const isPasswordMatch = await bcrypt.compare(password, user.Password);
+        const pwd = user.Password;
+        const looksBcrypt =
+            typeof pwd === 'string' &&
+            (/^\$2[ab]\$\d{2}\$/.test(pwd) || /^\$2y\$\d{2}\$/.test(pwd));
+        let isPasswordMatch = false;
+        try {
+            if (looksBcrypt) {
+                isPasswordMatch = await bcrypt.compare(password, pwd);
+            } else if (pwd != null && password != null) {
+                // Legacy/plain storage (migrate to bcrypt when possible)
+                isPasswordMatch = String(password) === String(pwd);
+            }
+        } catch {
+            isPasswordMatch = false;
+        }
         if (!isPasswordMatch) {
             return res.status(401).json({
                 success: false,
