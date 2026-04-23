@@ -430,16 +430,54 @@ const getDashboardData = async (req, res, next) => {
             console.error('Error calculating pending fee:', pendingFeeError.message);
         }
 
-        // Get birthday count
-   let birthdaycount = 0;
+        // Get today's birthdays
+        let birthdaycount = 0;
+        let todaysBirthdays = [];
         try {
-            const todayStr = currentDate.toISOString().split('T')[0];
-    for (const std of studentRecord) {
+            const monthDayKey = (value) => {
+                if (!value) return null;
+
+                const parsed = new Date(value);
+                if (!Number.isNaN(parsed.getTime())) {
+                    return `${parsed.getMonth() + 1}-${parsed.getDate()}`;
+                }
+
+                const parts = String(value).split(/[^0-9]/).filter(Boolean).map((p) => Number(p));
+                if (parts.length < 2) return null;
+
+                let month = parts[0];
+                let day = parts[1];
+                if (parts[0] > 12 && parts[1] <= 12) {
+                    day = parts[0];
+                    month = parts[1];
+                }
+
+                if (!month || !day || month > 12 || day > 31) return null;
+                return `${month}-${day}`;
+            };
+
+            const todayKey = `${currentDate.getMonth() + 1}-${currentDate.getDate()}`;
+            for (const std of studentRecord) {
                 if (std.DOB) {
                     try {
-                        const dobStr = new Date(std.DOB).toISOString().split('T')[0];
-                        if (dobStr === todayStr) {
+                        const dobKey = monthDayKey(std.DOB);
+                        if (dobKey === todayKey) {
                             birthdaycount++;
+                            const fullName = `${std.First_Name || ''} ${std.Last_Name || ''}`.trim();
+                            const className = [std.Class, std.Section].filter(Boolean).join(' - ');
+                            const rollNumber =
+                                std.RollNumber ||
+                                std.Roll_No ||
+                                std.Student_RollNumber ||
+                                std.Registration_Number ||
+                                '';
+
+                            todaysBirthdays.push({
+                                _id: std._id,
+                                studentName: fullName || std.Student_Name || std.Name || 'N/A',
+                                rollNumber: rollNumber || 'N/A',
+                                className: className || 'N/A',
+                            });
                         }
                     } catch (dobError) {
                         // Skip invalid DOB
@@ -667,6 +705,7 @@ const getDashboardData = async (req, res, next) => {
 
             // Other
             birthdayCount: birthdaycount,
+            todaysBirthdays: todaysBirthdays,
 
             // Upcoming Events
             upcomingExams: upcomingExams.map(exam => ({

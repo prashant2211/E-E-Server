@@ -51,6 +51,19 @@ const classSchema = new Schema({
         }],
         default: [],
         required: false
+    },
+    ClassTeacher_Code: {
+        type: String,
+        default: ''
+    },
+    ClassTeacher_Name: {
+        type: String,
+        default: ''
+    },
+    ClassTeacher_Id: {
+        type: Schema.Types.ObjectId,
+        ref: 'Teacher',
+        default: null
     }
 },
 {timestamps:true}

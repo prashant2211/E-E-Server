@@ -556,7 +556,10 @@ const store = async (req, res, next) => {
             ClassName: className,
             Session_Start_Day: req.body.Session_Start_Day,
             Session_End_Day: req.body.Session_End_Day,
-            Session: req.body.Session 
+            Session: req.body.Session,
+            ClassTeacher_Code: req.body.ClassTeacher_Code || '',
+            ClassTeacher_Name: req.body.ClassTeacher_Name || '',
+            ClassTeacher_Id: req.body.ClassTeacher_Id || null
         });
         console.log(`classRecord -=-=- `+JSON.stringify(classRecord));
         await classRecord.save();
@@ -940,6 +943,9 @@ const update = async (req, res, next) =>{
         if (req.body.Session_Start_Day !== undefined) updateData.Session_Start_Day = req.body.Session_Start_Day;
         if (req.body.Session_End_Day !== undefined) updateData.Session_End_Day = req.body.Session_End_Day;
         if (req.body.Session !== undefined) updateData.Session = req.body.Session;
+        if (req.body.ClassTeacher_Code !== undefined) updateData.ClassTeacher_Code = req.body.ClassTeacher_Code || '';
+        if (req.body.ClassTeacher_Name !== undefined) updateData.ClassTeacher_Name = req.body.ClassTeacher_Name || '';
+        if (req.body.ClassTeacher_Id !== undefined) updateData.ClassTeacher_Id = req.body.ClassTeacher_Id || null;
 
         const updatedClass = await classModel.findByIdAndUpdate(
             classId,
