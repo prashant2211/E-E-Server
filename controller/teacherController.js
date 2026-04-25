@@ -315,10 +315,14 @@ const store = async (req, res, next) => {
            });
        }
 
+       const plainPasswordFromBody = (req.body.Password ?? req.body.password ?? '').toString().trim();
+       const passwordUsedForNewUser = plainPasswordFromBody || 'Teacher@123';
+       let createdNewLoginUser = false;
+
        if (!existingUser) {
            // Only create user if it doesn't exist
-           const defaultPassword = req.body.Password || 'Teacher@123'; // Default password if not provided
-           const hashedPass = await bcrypt.hash(defaultPassword, 10);
+           const hashedPass = await bcrypt.hash(passwordUsedForNewUser, 10);
+           createdNewLoginUser = true;
        
            const user = new userModel({
                FirstName: req.body.First_Name,
@@ -350,7 +354,8 @@ const store = async (req, res, next) => {
             // Use dynamic URL from institution or frontend URL, never hardcode
             const url = req.body.Url || process.env.FRONTEND_URL || 'www.erpsystem.com'; 
             const fullName = `${req.body.First_Name} ${req.body.Last_Name}`;
-            const passwordToSend = req.body.Password || 'Teacher@123';
+            // Only include a real password when we just created the login user; otherwise avoid misleading "Teacher@123"
+            const passwordToSend = createdNewLoginUser ? passwordUsedForNewUser : '';
             await emailVerification(req.body.Email, fullName, req.user.InstutionName, req.body.Email, passwordToSend, url);
         } catch (emailError) {
             console.error('Email sending failed (non-critical):', emailError);
@@ -681,7 +686,11 @@ const emailVerification = async (email, fullName, institutionName, userName, pas
                 <div class="credentials">
                     <p><strong>Full Name:</strong> ${fullName}</p>
                     <p><strong>Username:</strong> ${userName}</p>
-                    <p><strong>Password:</strong> ${password}</p>
+                    ${
+                        password
+                            ? `<p><strong>Password:</strong> ${password}</p>`
+                            : `<p><strong>Password:</strong> Your login account already exists for this email. Please sign in with your existing password. If you forgot it, use the forgot-password option on the login page.</p>`
+                    }
                     <p><strong>Email:</strong> ${email}</p>
                     <p><strong>Institution Name:</strong> ${institutionName}</p>
                     <p><strong>Login URL:</strong> ${url}</p>
