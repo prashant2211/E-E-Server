@@ -221,15 +221,8 @@ const index = async (req, res, next) => {
       ];
     }
 
-    // Check cache first (include class/section filters so results don't mix)
     const classFilter = req.query.Class_Code || '';
     const sectionFilter = req.query.SectionCode || '';
-    const cacheKey = `students:${req.user.InstutionCode}:${page}:${limit}:${status}:${searchText}:${classFilter}:${sectionFilter}`;
-    const cached = cache.get(cacheKey);
-    
-    if (cached) {
-      return successResponse(res, cached.data, 'Data retrieved successfully', 200);
-    }
 
     // Optimized query with select only needed fields
     const [students, totalCount] = await Promise.all([
@@ -243,32 +236,62 @@ const index = async (req, res, next) => {
       studentModel.countDocuments(searchCondition)
     ]);
 
-    const result = {
-      data: students,
-      pagination: {
+    // Include totalRecords at root (required for admin table pagination)
+    return paginatedResponse(
+      res,
+      students,
+      {
         page,
         pageSize: limit,
         total: totalCount,
-        totalPages: Math.ceil(totalCount / limit),
-        hasNextPage: page < Math.ceil(totalCount / limit),
-        hasPreviousPage: page > 1
-      }
-    };
-
-    // Cache for 5 minutes
-    cache.set(cacheKey, result, 300);
-
-    return paginatedResponse(res, students, {
-      page,
-      pageSize: limit,
-      total: totalCount
-    }, 'Data retrieved successfully');
+      },
+      'Data retrieved successfully'
+    );
 
   } catch (error) {
     logger.error('Error fetching students:', error);
     const matchedKey = Object.keys(mongoErrorMessages).find(key => error.message.includes(key));
     const errorMessage = matchedKey ? mongoErrorMessages[matchedKey] : 'Failed to fetch students';
     return errorResponse(res, errorMessage, 500);
+  }
+};
+
+/**
+ * Institution-wide student counts (not paginated — for dashboard stat cards)
+ */
+const getStudentStats = async (req, res) => {
+  const permissionsResult = await getPermissionSet(req);
+
+  const studentPermissions = String(permissionsResult?.students || '');
+  const studentPermissionParts = studentPermissions.split('-');
+  const canReadStudents =
+    studentPermissionParts.includes('RA') || studentPermissionParts.includes('R');
+
+  if (!canReadStudents) {
+    return errorResponse(
+      res,
+      'You do not have the necessary permissions to access this resource. Please contact your administrator',
+      403
+    );
+  }
+
+  try {
+    const base = { InstutionCode: req.user.InstutionCode };
+
+    const [total, active, inactive] = await Promise.all([
+      studentModel.countDocuments(base),
+      studentModel.countDocuments({ ...base, Status: true }),
+      studentModel.countDocuments({ ...base, Status: false }),
+    ]);
+
+    return successResponse(
+      res,
+      { total, active, inactive },
+      'Student statistics retrieved successfully'
+    );
+  } catch (error) {
+    logger.error('Error fetching student statistics:', error);
+    return errorResponse(res, 'Failed to fetch student statistics', 500);
   }
 };
 
@@ -1632,6 +1655,7 @@ const sendWelcomeEmail = async (student, institutionName) => {
 
 module.exports = {
   index,
+  getStudentStats,
   getAllStudent,
   show,
   getStudentByRegisterationNumber,

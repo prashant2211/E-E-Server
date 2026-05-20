@@ -1,5 +1,16 @@
 const { response } = require('express')
 const feeStructureModel = require('../models/feeStructureModel')
+const { FEE_HEADS, normalizeFrequency, sumHeadsByFrequency } = require('../utils/feeHeads')
+
+const buildFrequencyPayload = (body, existing = {}) => {
+  const payload = {}
+  FEE_HEADS.forEach((head) => {
+    const freqField = `${head.key}Frequency`
+    const raw = body[freqField] !== undefined ? body[freqField] : existing[freqField]
+    payload[freqField] = normalizeFrequency(raw, head.defaultFrequency)
+  })
+  return payload
+}
 
 const store = (req, res, next) => {
   const tution = Number(req.body.TutionFee || 0) || 0
@@ -15,6 +26,22 @@ const store = (req, res, next) => {
   const totalfee =
     tution + library + activity + exam + uniform + prospectus + admission + transport + other
 
+  const frequencyPayload = buildFrequencyPayload(req.body)
+  const structureForTotals = {
+    TutionFee: tution.toString(),
+    LibraryFee: library.toString(),
+    ActivityFee: activity.toString(),
+    ExamFee: exam.toString(),
+    UniformFee: uniform.toString(),
+    ProspectusFee: prospectus.toString(),
+    AdmissionFee: admission.toString(),
+    TransportFee: transport.toString(),
+    OtherFee: other.toString(),
+    ...frequencyPayload,
+  }
+  const monthlyTotal = sumHeadsByFrequency(structureForTotals, 'monthly')
+  const yearlyTotal = sumHeadsByFrequency(structureForTotals, 'yearly')
+
   const feeStructure = new feeStructureModel({
     InstutionId: req.user.InstutionCode,
     Class: req.body.Class,
@@ -29,6 +56,9 @@ const store = (req, res, next) => {
     TransportFee: transport.toString(),
     OtherFee: other.toString(),
     Total: totalfee.toString(),
+    MonthlyTotal: monthlyTotal.toString(),
+    YearlyTotal: yearlyTotal.toString(),
+    ...frequencyPayload,
   })
   feeStructure
     .save()
@@ -111,6 +141,22 @@ const update = async (req, res) => {
     const totalfee =
       tution + library + activity + exam + uniform + prospectus + admission + transport + other
 
+    const frequencyPayload = buildFrequencyPayload(req.body, existing)
+    const structureForTotals = {
+      TutionFee: tution.toString(),
+      LibraryFee: library.toString(),
+      ActivityFee: activity.toString(),
+      ExamFee: exam.toString(),
+      UniformFee: uniform.toString(),
+      ProspectusFee: prospectus.toString(),
+      AdmissionFee: admission.toString(),
+      TransportFee: transport.toString(),
+      OtherFee: other.toString(),
+      ...frequencyPayload,
+    }
+    const monthlyTotal = sumHeadsByFrequency(structureForTotals, 'monthly')
+    const yearlyTotal = sumHeadsByFrequency(structureForTotals, 'yearly')
+
     const updated = await feeStructureModel.findByIdAndUpdate(
       id,
       {
@@ -127,6 +173,9 @@ const update = async (req, res) => {
           TransportFee: transport.toString(),
           OtherFee: other.toString(),
           Total: totalfee.toString(),
+          MonthlyTotal: monthlyTotal.toString(),
+          YearlyTotal: yearlyTotal.toString(),
+          ...frequencyPayload,
         },
       },
       { new: true }

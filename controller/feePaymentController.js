@@ -70,6 +70,23 @@ const attachProofSignedUrls = async (rows) => {
   return list
 }
 
+const {
+  toAmount,
+  findFeeStructure,
+  findFeeStructureFromList,
+  resolveSelectedHeadKeys,
+  amountsForSelectedHeads,
+  feeTypeLabelFromHeads,
+  computeDueContext,
+  sumHeadsByFrequency,
+  sumHeadsByFrequencyOnPayment,
+  computeInstitutionMonthlyPending,
+  paymentCountsAsPaid,
+  getPreviousMonthlyPending,
+  getPreviousBalanceCarriedForward,
+  computePaymentSettlement,
+} = require('../utils/feeHeads')
+
 const feePaymentWriteAllowed = (permissionsResult) => {
   const raw = String(permissionsResult?.feePayment || '')
   const parts = raw.split('-')
@@ -80,13 +97,6 @@ const feePaymentReadAllowed = (permissionsResult) => {
   const raw = String(permissionsResult?.feePayment || '')
   const parts = raw.split('-')
   return parts.includes('R') || parts.includes('RA') || parts.includes('W') || parts.includes('E')
-}
-
-// Helper: safe number parsing
-const toAmount = (val) => {
-  if (val === null || val === undefined) return 0
-  const n = parseFloat(String(val).toString().replace(/,/g, '').trim())
-  return isNaN(n) ? 0 : n
 }
 
 // Record a fee payment (offline/online) and update outstanding
@@ -115,11 +125,11 @@ const store = async (req, res, next) => {
       PaidAmount,
     } = req.body
 
-    if (!instutionId || !StudentId || !Class || !FeeType) {
+    if (!instutionId || !StudentId || !Class) {
       return res.status(400).json({
         success: false,
         code: 400,
-        message: 'InstutionId, StudentId, Class and FeeType are required',
+        message: 'InstutionId, StudentId and Class are required',
       })
     }
 
@@ -146,79 +156,86 @@ const store = async (req, res, next) => {
       })
     }
 
-    const previousOutstanding = toAmount(student.OutstandingAmount)
+    const priorPayments = await feePaymentModel
+      .find({
+        InstutionId: instutionId,
+        StudentId,
+        ...(scope ? { createdAt: { $gte: scope.from, $lte: scope.to } } : {}),
+      })
+      .lean()
 
-    // Fetch base fee structure for the class (optional; if not found, rely on request values)
-    let baseStructure = await feeStructureModel.findOne({
-      InstutionId: instutionId,
-      Class: Class,
-    })
+    const sectionName = String(req.body.Section || student.Section || '').trim()
+    const baseStructure = await findFeeStructure(
+      feeStructureModel,
+      instutionId,
+      Class,
+      sectionName
+    )
 
-    // Compute base fee from structure or request
-    const baseTution = baseStructure
-      ? toAmount(baseStructure.TutionFee)
-      : toAmount(req.body.TutionFee)
-    const baseLibrary = baseStructure
-      ? toAmount(baseStructure.LibraryFee)
-      : toAmount(req.body.LibraryFee)
-    const baseActivity = baseStructure
-      ? toAmount(baseStructure.ActivityFee)
-      : toAmount(req.body.ActivityFee)
-    const baseExam = baseStructure ? toAmount(baseStructure.ExamFee) : toAmount(req.body.ExamFee)
-    const baseUniform = baseStructure
-      ? toAmount(baseStructure.UniformFee)
-      : toAmount(req.body.UniformFee)
-    const baseProspectus = baseStructure
-      ? toAmount(baseStructure.ProspectusFee)
-      : toAmount(req.body.ProspectusFee)
-    const baseTransport = baseStructure
-      ? toAmount(baseStructure.TransportFee)
-      : toAmount(req.body.TransportFee)
-    const baseOther = baseStructure
-      ? toAmount(baseStructure.OtherFee)
-      : toAmount(req.body.OtherFee)
+    const selectedKeys = resolveSelectedHeadKeys(req.body, baseStructure)
+    if (!selectedKeys.length) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'Select at least one fee type to collect',
+      })
+    }
 
-    const baseTotal =
-      baseTution +
-      baseLibrary +
-      baseActivity +
-      baseExam +
-      baseUniform +
-      baseProspectus +
-      baseTransport +
-      baseOther
+    const { amounts, total: baseTotal, monthlyTotal, yearlyTotal } = amountsForSelectedHeads(
+      baseStructure,
+      selectedKeys
+    )
+    if (baseTotal <= 0) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'Selected fee types have no amount in fee structure for this class',
+      })
+    }
+
+    const feeTypeLabel = feeTypeLabelFromHeads(selectedKeys)
 
     const scholarship = toAmount(ScholarshipAmount)
     const concession = toAmount(ConcessionAmount)
 
-    // Allow scholarship/concession to reduce overall dues (including previous pending)
-    const netThisPeriod = baseTotal - scholarship - concession
-    let totalDueBeforePayment = previousOutstanding + netThisPeriod
-    if (totalDueBeforePayment < 0) {
-      totalDueBeforePayment = 0
-    }
-    const newOutstanding = Math.max(0, totalDueBeforePayment - paid)
+    const previousBalance = getPreviousBalanceCarriedForward(priorPayments, {
+      fallback: toAmount(student.OutstandingAmount),
+    })
+
+    const settlement = computePaymentSettlement({
+      previousBalance,
+      monthlyTotal,
+      yearlyTotal,
+      scholarship,
+      concession,
+      paid,
+    })
+    const { totalRemainingAfterPayment } = settlement
+
+    const otherWithAdmission =
+      toAmount(amounts.OtherFee) + toAmount(amounts.AdmissionFee)
 
     const feePatment = new feePaymentModel({
       InstutionId: instutionId,
       StudentId,
       StudentName: StudentName || `${student.First_Name || ''} ${student.Last_Name || ''}`.trim(),
       Class,
-      TutionFee: baseTution.toString(),
-      LibraryFee: baseLibrary.toString(),
-      ActivityFee: baseActivity.toString(),
-      ExamFee: baseExam.toString(),
-      UniformFee: baseUniform.toString(),
-      ProspectusFee: baseProspectus.toString(),
-      TransportFee: baseTransport.toString(),
-      OtherFee: baseOther.toString(),
+      TutionFee: String(amounts.TutionFee || 0),
+      LibraryFee: String(amounts.LibraryFee || 0),
+      ActivityFee: String(amounts.ActivityFee || 0),
+      ExamFee: String(amounts.ExamFee || 0),
+      UniformFee: String(amounts.UniformFee || 0),
+      ProspectusFee: String(amounts.ProspectusFee || 0),
+      TransportFee: String(amounts.TransportFee || 0),
+      OtherFee: String(otherWithAdmission),
       PaidAmount: paid.toString(),
-      PendingAmount: newOutstanding.toString(),
+      PendingAmount: totalRemainingAfterPayment.toString(),
       ScholarshipAmount: scholarship.toString(),
       ConcessionAmount: concession.toString(),
       Month: Month || '',
       AcademicYear: academicYearName,
-      FeeType,
+      FeeType: feeTypeLabel || FeeType || 'Fee payment',
+      SelectedFeeHeads: selectedKeys,
       PaymentMode,
       PaymentReference,
       Date: date,
@@ -228,8 +245,8 @@ const store = async (req, res, next) => {
 
     await feePatment.save()
 
-    // Update student's outstanding
-    student.OutstandingAmount = newOutstanding.toString()
+    // Monthly outstanding only (yearly optional fees do not carry forward)
+    student.OutstandingAmount = totalRemainingAfterPayment.toString()
     await student.save()
 
     res.status(201).json({
@@ -399,20 +416,89 @@ const getAnalyticsSummary = async (req, res, next) => {
       }
     }
 
-    // Pending for entire school (from student outstanding)
+    // Pending for entire school (from student outstanding — cumulative)
     const allStudents = await studentModel.find({ InstutionCode: instutionId }).select(
-      'OutstandingAmount Class'
+      'OutstandingAmount Class Section Registration_Number Status'
     )
     let totalPending = 0
     allStudents.forEach((s) => {
       totalPending += toAmount(s.OutstandingAmount)
     })
 
+    // Current calendar month: monthly fee expected minus collected (monthly heads only)
+    const monthParam =
+      String(req.query.month || req.query.Month || '').trim() ||
+      `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}`
+
+    const scope = await resolveAcademicYearScope(req)
+    const academicYearName = scope?.yearDoc?.Year_Name || ''
+
+    const activeStudents = allStudents.filter((s) => s.Status !== false)
+    const structures = await feeStructureModel.find({ InstutionId: instutionId }).lean()
+    const studentByReg = new Map(
+      activeStudents.map((s) => [String(s.Registration_Number || ''), s])
+    )
+
+    const paymentFilter = {
+      InstutionId: instutionId,
+      Status: 'Success',
+      ...(scope ? { createdAt: { $gte: scope.from, $lte: scope.to } } : {}),
+    }
+    const scopedPayments = await feePaymentModel
+      .find(paymentFilter)
+      .select(
+        'StudentId Class PaidAmount VerificationStatus Status Month AcademicYear TutionFee LibraryFee ActivityFee ExamFee UniformFee ProspectusFee TransportFee OtherFee'
+      )
+      .lean()
+
+    const paymentsByStudent = new Map()
+    scopedPayments.filter(paymentCountsAsPaid).forEach((p) => {
+      const id = String(p.StudentId || '')
+      if (!id) return
+      if (!paymentsByStudent.has(id)) paymentsByStudent.set(id, [])
+      paymentsByStudent.get(id).push(p)
+    })
+
+    const {
+      currentMonthPending,
+      currentMonthExpected,
+      studentsWithCurrentMonthPending,
+    } = computeInstitutionMonthlyPending({
+      students: activeStudents,
+      structures,
+      paymentsByStudent,
+      month: monthParam,
+      academicYear: academicYearName,
+    })
+
+    let currentMonthCollected = 0
+    scopedPayments
+      .filter(
+        (p) =>
+          paymentCountsAsPaid(p) && String(p.Month || '') === monthParam
+      )
+      .forEach((p) => {
+        const stu = studentByReg.get(String(p.StudentId || ''))
+        const structure = stu
+          ? findFeeStructureFromList(structures, stu.Class, stu.Section || '')
+          : findFeeStructureFromList(structures, p.Class, '')
+        if (structure) {
+          currentMonthCollected += sumHeadsByFrequencyOnPayment(p, structure, 'monthly')
+        } else {
+          currentMonthCollected += toAmount(p.PaidAmount)
+        }
+      })
+
     const responseData = {
       totalCollected,
       todayCollected,
       rangeCollected,
       totalPending,
+      currentMonth: monthParam,
+      currentMonthPending,
+      currentMonthExpected,
+      currentMonthCollected,
+      studentsWithCurrentMonthPending,
     }
 
     // If className is provided, compute class-specific stats
@@ -545,6 +631,116 @@ const getClassPendingList = async (req, res, next) => {
       success: false,
       message: error.message,
       code: 500,
+    })
+  }
+}
+
+/**
+ * Fee heads, due amounts, and defaults for fee collection UI (multi-select).
+ */
+const getStudentFeeDue = async (req, res) => {
+  try {
+    const instutionId = req.user?.InstutionCode
+    if (!instutionId) {
+      return res.status(401).json({
+        success: false,
+        code: 401,
+        message: 'Institution context not found',
+      })
+    }
+
+    const permissionsResult = await getPermissionSet(req)
+    if (!feePaymentReadAllowed(permissionsResult)) {
+      return res.status(403).json({
+        success: false,
+        code: 403,
+        message: 'You do not have permission to view fee details',
+      })
+    }
+
+    const StudentId = String(req.query.StudentId || req.query.studentId || '').trim()
+    const Class = String(req.query.Class || '').trim()
+    const Section = String(req.query.Section || '').trim()
+    const Month =
+      String(req.query.Month || '').trim() ||
+      `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`
+
+    if (!StudentId || !Class) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'StudentId and Class are required',
+      })
+    }
+
+    const scope = await resolveAcademicYearScope(req)
+    const academicYearName = scope?.yearDoc?.Year_Name || req.query.AcademicYear || ''
+
+    const structure = await findFeeStructure(feeStructureModel, instutionId, Class, Section)
+    if (!structure) {
+      return res.status(200).json({
+        success: true,
+        code: 200,
+        message: 'No fee structure found for this class',
+        data: {
+          heads: [],
+          monthlyDue: 0,
+          yearlyDue: 0,
+          currentMonthFee: 0,
+          currentPeriodDue: 0,
+          defaultSelectedKeys: [],
+          monthlyTotal: 0,
+          yearlyTotal: 0,
+        },
+      })
+    }
+
+    const payments = await feePaymentModel
+      .find({
+        InstutionId: instutionId,
+        StudentId,
+        ...(scope ? { createdAt: { $gte: scope.from, $lte: scope.to } } : {}),
+      })
+      .lean()
+
+    const dueContext = computeDueContext({
+      structure,
+      payments,
+      month: Month,
+      academicYear: academicYearName,
+    })
+
+    const student = await studentModel
+      .findOne({ InstutionCode: instutionId, Registration_Number: StudentId })
+      .select('OutstandingAmount')
+      .lean()
+
+    const paidList = payments.filter(paymentCountsAsPaid)
+    const previousBalance = getPreviousBalanceCarriedForward(paidList, {
+      fallback: toAmount(student?.OutstandingAmount),
+    })
+    const previousMonthlyPending = getPreviousMonthlyPending(paidList, {
+      structure,
+      fallback: toAmount(student?.OutstandingAmount),
+    })
+
+    return res.status(200).json({
+      success: true,
+      code: 200,
+      message: 'Student fee due details fetched successfully',
+      data: {
+        ...dueContext,
+        previousOutstanding: previousBalance,
+        previousMonthlyPending,
+        month: Month,
+        academicYear: academicYearName,
+      },
+    })
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      code: 500,
+      message: error.message,
     })
   }
 }
@@ -906,6 +1102,14 @@ const studentSubmitPayment = async (req, res) => {
       InstutionId: instutionId,
       Class: Class,
     })
+    if (student.Section) {
+      const bySection = await feeStructureModel.findOne({
+        InstutionId: instutionId,
+        Class: Class,
+        Section: student.Section,
+      })
+      if (bySection) baseStructure = bySection
+    }
 
     const baseTution = baseStructure ? toAmount(baseStructure.TutionFee) : 0
     const baseLibrary = baseStructure ? toAmount(baseStructure.LibraryFee) : 0
@@ -942,7 +1146,17 @@ const studentSubmitPayment = async (req, res) => {
       proofUrl = uploaded.Location || ''
     }
 
-    const outstandingSnapshot = toAmount(student.OutstandingAmount)
+    const priorPayments = await feePaymentModel
+      .find({
+        InstutionId: instutionId,
+        StudentId: registrationNumber,
+        ...(scope ? { createdAt: { $gte: scope.from, $lte: scope.to } } : {}),
+      })
+      .lean()
+
+    const previousBalance = getPreviousBalanceCarriedForward(priorPayments, {
+      fallback: toAmount(student.OutstandingAmount),
+    })
 
     const feePatment = new feePaymentModel({
       InstutionId: instutionId,
@@ -958,7 +1172,7 @@ const studentSubmitPayment = async (req, res) => {
       TransportFee: baseTransport.toString(),
       OtherFee: baseOther.toString(),
       PaidAmount: paid.toString(),
-      PendingAmount: outstandingSnapshot.toString(),
+      PendingAmount: previousBalance.toString(),
       ScholarshipAmount: '0',
       ConcessionAmount: '0',
       Month,
@@ -971,6 +1185,10 @@ const studentSubmitPayment = async (req, res) => {
       Status: 'Pending',
       VerificationStatus: 'Pending',
       StudentSubmittedPayment: true,
+      SelectedFeeHeads: resolveSelectedHeadKeys(
+        { SelectedFeeHeads: req.body.SelectedFeeHeads, FeeType },
+        baseStructure
+      ),
       ProofImageKey: proofKey,
       ProofImageUrl: proofUrl,
     })
@@ -1130,13 +1348,53 @@ const verifyStudentPayment = async (req, res) => {
     }
 
     const paid = toAmount(payment.PaidAmount)
-    const currentOutstanding = toAmount(student.OutstandingAmount)
-    const newOutstanding = Math.max(0, currentOutstanding - paid)
+    const scope = await resolveAcademicYearScope(req)
+    const academicYearName = scope?.yearDoc?.Year_Name || payment.AcademicYear || ''
 
-    student.OutstandingAmount = newOutstanding.toString()
+    const priorPayments = await feePaymentModel
+      .find({
+        InstutionId: instutionId,
+        StudentId: payment.StudentId,
+        ...(scope ? { createdAt: { $gte: scope.from, $lte: scope.to } } : {}),
+      })
+      .lean()
+
+    const sectionName = String(student.Section || payment.Class || '').trim()
+    const baseStructure = await findFeeStructure(
+      feeStructureModel,
+      instutionId,
+      payment.Class,
+      sectionName
+    )
+
+    const selectedKeys = resolveSelectedHeadKeys(
+      { SelectedFeeHeads: payment.SelectedFeeHeads, FeeType: payment.FeeType },
+      baseStructure
+    )
+    const { monthlyTotal, yearlyTotal } = amountsForSelectedHeads(
+      baseStructure || {},
+      selectedKeys
+    )
+
+    const previousBalance = getPreviousBalanceCarriedForward(priorPayments, {
+      excludePaymentId: payment._id,
+      fallback: toAmount(student.OutstandingAmount),
+    })
+
+    const settlement = computePaymentSettlement({
+      previousBalance,
+      monthlyTotal,
+      yearlyTotal,
+      scholarship: toAmount(payment.ScholarshipAmount),
+      concession: toAmount(payment.ConcessionAmount),
+      paid,
+    })
+
+    student.OutstandingAmount = settlement.totalRemainingAfterPayment.toString()
     await student.save()
 
-    payment.PendingAmount = newOutstanding.toString()
+    payment.PendingAmount = settlement.totalRemainingAfterPayment.toString()
+    payment.AcademicYear = payment.AcademicYear || academicYearName
     payment.Status = 'Success'
     payment.VerificationStatus = 'Approved'
     payment.VerifiedAt = new Date()
@@ -1166,6 +1424,7 @@ module.exports = {
   showAllPayment,
   getAnalyticsSummary,
   getClassPendingList,
+  getStudentFeeDue,
   getStudentSummary,
   storeAdmissionFee,
   studentSubmitPayment,

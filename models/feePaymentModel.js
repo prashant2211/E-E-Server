@@ -72,7 +72,12 @@ const feePaymentSchema = new Schema(
       type: String, // e.g. "2025-26"
     },
     FeeType: {
-      type: String, // e.g. Monthly, Admission, Transport, Other
+      type: String, // e.g. "Tuition Fee, Examination Fee" or legacy Monthly, Admission
+    },
+    /** Fee head keys collected in this transaction (e.g. TutionFee, ExamFee) */
+    SelectedFeeHeads: {
+      type: [String],
+      default: undefined,
     },
     // Payment meta
     PaymentMode: {

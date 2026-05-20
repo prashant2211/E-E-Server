@@ -75,6 +75,11 @@ const systemSettingsSchema = new Schema({
     type: String,
     default: 'DD/MM/YYYY'
   },
+  /** When true, institution has grand access (set by school admin in Settings). */
+  Grand_Access: {
+    type: Boolean,
+    default: false,
+  },
   Features: {
     Library: { type: Boolean, default: true },
     Transport: { type: Boolean, default: true },

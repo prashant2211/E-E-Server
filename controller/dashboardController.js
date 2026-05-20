@@ -9,6 +9,7 @@ const examScheduleModel = require('../models/examScheduleModel')
 const announcementModel = require('../models/announcementModel')
 const marksheetModel = require('../models/studentMarksheetModel')
 const sectionModel = require('../models/sectionModel')
+const { sumHeadsByFrequency } = require('../utils/feeHeads')
 
 const getDashboardData = async (req, res, next) => {
     if (req.user.UserType != 'SuperAdmin' && req.user.UserType != 'Admin') {
@@ -380,11 +381,11 @@ const getDashboardData = async (req, res, next) => {
                 const studentSection = student.Section || '';
                 const key = `${studentClass}_${studentSection}`;
                 
-                // Get monthly fee from fee structure
+                // Monthly fee from structure (monthly heads only — excludes yearly one-time fees)
                 let monthlyFee = 0;
                 const structure = feeStructureMap.get(key) || feeStructureMap.get(`${studentClass}_`);
-                if (structure && structure.Total) {
-                    monthlyFee = parseAmount(structure.Total);
+                if (structure) {
+                    monthlyFee = sumHeadsByFrequency(structure, 'monthly');
                 }
 
                 // Check if student paid in the selected period

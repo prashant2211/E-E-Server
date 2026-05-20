@@ -22,34 +22,89 @@ const feeStructureSchema = new Schema(
     TutionFee: {
       type: String,
     },
+    TutionFeeFrequency: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+      default: 'monthly',
+    },
     LibraryFee: {
       type: String,
+    },
+    LibraryFeeFrequency: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+      default: 'monthly',
     },
     ActivityFee: {
       type: String,
     },
+    ActivityFeeFrequency: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+      default: 'monthly',
+    },
     ExamFee: {
       type: String,
+    },
+    ExamFeeFrequency: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+      default: 'yearly',
     },
     UniformFee: {
       type: String,
     },
+    UniformFeeFrequency: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+      default: 'yearly',
+    },
     ProspectusFee: {
       type: String,
+    },
+    ProspectusFeeFrequency: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+      default: 'yearly',
     },
     /** One-time admission / registration fee for this class (optional section row) */
     AdmissionFee: {
       type: String,
       default: '0',
     },
+    AdmissionFeeFrequency: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+      default: 'yearly',
+    },
     TransportFee: {
       type: String,
+    },
+    TransportFeeFrequency: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+      default: 'monthly',
     },
     OtherFee: {
       type: String,
     },
+    OtherFeeFrequency: {
+      type: String,
+      enum: ['monthly', 'yearly'],
+      default: 'monthly',
+    },
     Total: {
       type: String,
+    },
+    /** Sum of fee heads billed monthly (excludes yearly one-time heads) */
+    MonthlyTotal: {
+      type: String,
+      default: '0',
+    },
+    /** Sum of fee heads billed once per year */
+    YearlyTotal: {
+      type: String,
+      default: '0',
     },
   },
   { timestamps: true }

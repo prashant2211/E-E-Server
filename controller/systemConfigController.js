@@ -179,6 +179,7 @@ const getSystemSettings = async (req, res) => {
     if (!settingsDoc) {
       settingsDoc = await SystemSettings.create({
         InstutionCode: req.user.InstutionCode,
+        Grand_Access: false,
         Features: {
           Library: true,
           Transport: true,
@@ -202,40 +203,44 @@ const getSystemSettings = async (req, res) => {
         }
       });
     } else {
-      // Ensure nested structure exists for existing documents
-      if (!settingsDoc.Settings) {
-        settingsDoc.Settings = {};
-      }
-      if (!settingsDoc.Settings.Documents) {
-        settingsDoc.Settings.Documents = {
-          LogoKey: null,
-          LogoUrl: null,
-          PrincipalSignatureKey: null,
-          PrincipalSignatureUrl: null,
-          DirectorSignatureKey: null,
-          DirectorSignatureUrl: null,
-          FeeQRKey: null,
-          FeeQRUrl: null,
-          OtherDocs: []
-        };
+      // Ensure nested Documents exist without full document .save() (avoids resetting Grand_Access)
+      const defaultDocuments = {
+        LogoKey: null,
+        LogoUrl: null,
+        PrincipalSignatureKey: null,
+        PrincipalSignatureUrl: null,
+        DirectorSignatureKey: null,
+        DirectorSignatureUrl: null,
+        FeeQRKey: null,
+        FeeQRUrl: null,
+        OtherDocs: [],
+      };
+      const docPatch = {};
+      if (!settingsDoc.Settings || typeof settingsDoc.Settings !== 'object') {
+        docPatch.Settings = { Documents: { ...defaultDocuments } };
+      } else if (!settingsDoc.Settings.Documents) {
+        docPatch['Settings.Documents'] = { ...defaultDocuments };
       } else {
-        if (settingsDoc.Settings.Documents.FeeQRKey === undefined) {
-          settingsDoc.Settings.Documents.FeeQRKey = null;
-        }
-        if (settingsDoc.Settings.Documents.FeeQRUrl === undefined) {
-          settingsDoc.Settings.Documents.FeeQRUrl = null;
-        }
-        if (!Array.isArray(settingsDoc.Settings.Documents.OtherDocs)) {
-          settingsDoc.Settings.Documents.OtherDocs = [];
-        }
+        const docs = settingsDoc.Settings.Documents;
+        if (docs.FeeQRKey === undefined) docPatch['Settings.Documents.FeeQRKey'] = null;
+        if (docs.FeeQRUrl === undefined) docPatch['Settings.Documents.FeeQRUrl'] = null;
+        if (!Array.isArray(docs.OtherDocs)) docPatch['Settings.Documents.OtherDocs'] = [];
       }
-
-      // Mark Mixed path as modified so Mongoose actually saves it
-      settingsDoc.markModified('Settings');
-      await settingsDoc.save();
+      if (Object.keys(docPatch).length) {
+        await SystemSettings.updateOne(
+          { InstutionCode: req.user.InstutionCode },
+          { $set: docPatch }
+        );
+        settingsDoc = await SystemSettings.findOne({
+          InstutionCode: req.user.InstutionCode,
+        }).select('-__v');
+      }
     }
 
     const settings = settingsDoc.toObject();
+    settings.Grand_Access = Boolean(
+      settings.Grand_Access ?? settings.Settings?.Grand_Access ?? false
+    );
 
     // For private S3 buckets, replace raw URLs with fresh signed URLs before sending to UI
     if (settings.Settings && settings.Settings.Documents) {
@@ -286,13 +291,53 @@ const updateSystemSettings = async (req, res) => {
     const updateData = { ...req.body };
     delete updateData.InstutionCode;
 
+    const normalizedUserType = String(req.user?.UserType || '')
+      .trim()
+      .toLowerCase()
+      .replace(/\s+/g, '');
+
+    if (normalizedUserType === 'superadmin') {
+      delete updateData.Grand_Access;
+      delete updateData.grandAccess;
+    } else if (updateData.grandAccess !== undefined && updateData.Grand_Access === undefined) {
+      updateData.Grand_Access = Boolean(updateData.grandAccess);
+      delete updateData.grandAccess;
+    }
+    const instutionCode = req.user.InstutionCode;
+    if (!instutionCode) {
+      return errorResponse(res, 'Institution code is required', 400);
+    }
+
+    const $set = {};
+    if (updateData.Grand_Access !== undefined) {
+      const grandAccess = Boolean(updateData.Grand_Access);
+      $set.Grand_Access = grandAccess;
+      $set['Settings.Grand_Access'] = grandAccess;
+    }
+    if (updateData.School_Name !== undefined) $set.School_Name = updateData.School_Name;
+    if (updateData.Address !== undefined) $set.Address = updateData.Address;
+    if (updateData.Contact_Phone !== undefined) $set.Contact_Phone = updateData.Contact_Phone;
+    if (updateData.Contact_Email !== undefined) $set.Contact_Email = updateData.Contact_Email;
+    if (updateData.Timezone !== undefined) $set.Timezone = updateData.Timezone;
+    if (updateData.Currency !== undefined) $set.Currency = updateData.Currency;
+    if (updateData.Date_Format !== undefined) $set.Date_Format = updateData.Date_Format;
+    if (updateData.Features !== undefined) $set.Features = updateData.Features;
+
+    if (!Object.keys($set).length) {
+      return errorResponse(res, 'No valid settings fields to update', 400);
+    }
+
     let settings = await SystemSettings.findOneAndUpdate(
-      { InstutionCode: req.user.InstutionCode },
-      updateData,
-      { new: true, upsert: true }
+      { InstutionCode: instutionCode },
+      {
+        $set,
+        // InstutionCode only on insert — do not repeat Grand_Access here ($set already sets it)
+        $setOnInsert: { InstutionCode: instutionCode },
+      },
+      { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
     ).select('-__v');
 
-    cache.delete(`settings:${req.user.InstutionCode}`);
+    cache.delete(`settings:${instutionCode}`);
     return successResponse(res, settings, 'Settings updated successfully');
   } catch (error) {
     logger.error('Error updating settings:', error);

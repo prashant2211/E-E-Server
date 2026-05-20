@@ -1,6 +1,6 @@
 const Institution = require('../models/InstutionModel');
 const User = require('../models/User');
-const { AcademicYear } = require('../models/academicYearModel');
+const { AcademicYear, SystemSettings } = require('../models/academicYearModel');
 const bcrypt = require('bcryptjs');
 const nodemailer = require('nodemailer');
 const util = require('util');
@@ -69,6 +69,7 @@ const validateOnboardingData = (data) => {
   const adminEmail = (data.adminEmail || '').trim();
   const adminPhone = (data.adminPhone || '').trim();
   const adminPassword = data.adminPassword;
+  const institutionUrl = (data.institutionUrl || '').trim();
 
   if (institutionName.length < 3) {
     errors.push('Institution name is required (minimum 3 characters)');
@@ -112,6 +113,19 @@ const validateOnboardingData = (data) => {
 
   if (adminPhone.length < 10) {
     errors.push('Valid admin phone number is required (minimum 10 digits)');
+  }
+
+  if (!institutionUrl) {
+    errors.push('Institution URL is required');
+  } else {
+    try {
+      const parsedUrl = new URL(institutionUrl);
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        errors.push('Institution URL must start with http:// or https://');
+      }
+    } catch (e) {
+      errors.push('Valid institution URL is required');
+    }
   }
 
   return errors;
@@ -344,6 +358,7 @@ const onboardSchool = async (req, res) => {
       adminLastName: raw.adminLastName || fallbackLastName,
       adminEmail: raw.adminEmail || raw.adminUsername || '',
       adminPhone: raw.adminPhone || raw.contactNumber || raw.institutionPhone || '',
+      institutionUrl: pickFirstNonEmpty(raw, ['institutionUrl', 'url', 'institutionURL']),
       state: stateFromAliases,
       district: districtFromAliases,
       address: addressFromAliases,
@@ -423,12 +438,19 @@ const onboardSchool = async (req, res) => {
     // Generate Institution ID
     const institutionId = await generateInstitutionId(data.institutionName);
 
-    const frontendBase = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
-    const customInstitutionUrl = String(data.institutionUrl || '').trim();
-    // Url is unique in DB; default login URL must differ per institution
-    const institutionPortalUrl =
-      customInstitutionUrl ||
-      `${frontendBase}/login?institution=${encodeURIComponent(institutionId)}`;
+    const institutionPortalUrl = String(data.institutionUrl || '').trim().replace(/\/$/, '');
+
+    const existingUrlInstitution = await Institution.findOne({
+      Url: institutionPortalUrl,
+    }).session(session);
+    if (existingUrlInstitution) {
+      await session.abortTransaction();
+      return res.status(409).json({
+        success: false,
+        message: 'Institution URL already exists. Please provide a unique URL',
+        code: 409,
+      });
+    }
 
     // Create Institution
     const institution = new Institution({
@@ -686,16 +708,31 @@ const listInstitutionsPublic = async (req, res) => {
       }
     });
 
+    const settingsRows = await SystemSettings.find({
+      InstutionCode: { $in: institutionCodes },
+    })
+      .select('InstutionCode Grand_Access Settings')
+      .lean();
+
+    const grandAccessByCode = {};
+    settingsRows.forEach((row) => {
+      grandAccessByCode[row.InstutionCode] = Boolean(
+        row.Grand_Access ?? row.Settings?.Grand_Access
+      );
+    });
+
     return res.json({
       success: true,
       message: 'Institutions retrieved successfully',
       code: 200,
       data: institutions.map((inst) => {
         const admin = adminByCode[inst.Instution_Id] || null;
+        const code = inst.Instution_Id;
         return {
           ...inst,
           AdminEmail: admin?.Email || null,
           AdminUserName: admin?.UserName || null,
+          Grand_Access: grandAccessByCode[code] ?? false,
         };
       }),
     });
