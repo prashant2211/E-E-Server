@@ -10,6 +10,7 @@ const storage = multer.memoryStorage()
 const upload = multer({ storage })
 
 
+router.get('/student-stats', authenticate, StudentController.getStudentStats)
 router.get('/get-all-student',authenticate, StudentController.index)
 router.get('/get-byid-student', authenticate, StudentController.show)
 router.get('/get-all-student-list', authenticate, StudentController.getAllStudent)    //getStudentProfile      get student list call via mobile app

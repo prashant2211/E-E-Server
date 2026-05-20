@@ -6,9 +6,9 @@ const mongoose = require('mongoose');
 const morgan = require('morgan');
 const bodyParser = require('body-parser');
 const compression = require('compression');
-const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
+const cors = require('cors');
 
 const { assertJwtConfigForEnvironment } = require('./utils/jwtConfig');
 
@@ -71,6 +71,7 @@ const staffOnboardingRoute = require('./routes/staffOnboardingRoute');
 const sectionRoute = require('./routes/sectionRoute');
 const idCardRoute = require('./routes/idCardRoute');
 const auditLogRoute = require('./routes/auditLogRoute');
+const teacherAttendanceRoute = require('./routes/teacherAttendanceRoute');
 const { getPublicInstitutionStatus } = require('./controller/publicInstitutionController');
 
 // Import middleware
@@ -81,31 +82,38 @@ const auditLogger = require('./middleware/auditLogger');
 
 // Initialize Express app
 const app = express();
+app.disable('x-powered-by');
 
-// CORS must run first. Express's built-in OPTIONS (Allow: POST + body) runs on routers when cors
-// calls next() — e.g. Origin header stripped by a proxy → no Allow-Origin → browser CORS failure.
-// This middleware always sets headers and ends OPTIONS before any router sees it.
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS,HEAD');
-  const requestedHeaders = req.headers['access-control-request-headers'];
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    requestedHeaders ||
-      'Content-Type, Authorization, X-Requested-With, x-academic-year-id, x-target-institution-code, x-feature-name, x-latitude, x-longitude, x-request-id'
-  );
-  res.setHeader('Access-Control-Max-Age', '86400');
-  if (req.method === 'OPTIONS') {
-    return res.status(204).end();
-  }
-  next();
-});
+// Behind nginx / a load balancer: correct client IPs, secure cookies, rate-limit behavior
+if (process.env.TRUST_PROXY === '1' || process.env.NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
 
-// Security middleware (CORP same-origin can block cross-origin reads; API is cross-origin)
-app.use(helmet({
-  contentSecurityPolicy: false,
-  crossOriginEmbedderPolicy: false,
-  crossOriginResourcePolicy: { policy: 'cross-origin' },
+// API mount path — must match nginx location + VITE_API_BASE_URL (no trailing slash)
+// Default matches ForntEnd vite proxy rewrite and production URLs like …/EducationalEternity
+const BASE_URL =
+  String(process.env.BASE_URL || '/EducationalEternity')
+    .trim()
+    .replace(/\/+$/, '') || '/EducationalEternity'
+
+// Browsers still enforce CORS for cross-origin XHR/fetch; the only way to "allow everyone" is to
+// send these headers on every response and answer OPTIONS with 204 (no Express router OPTIONS).
+app.use(cors({
+  origin: '*', // or your frontend URL
+  methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS','HEAD'],
+  allowedHeaders: [
+    'Content-Type',
+    'Authorization',
+    'Accept',
+    'X-Requested-With',
+    'x-academic-year-id',
+    'x-target-institution-code',
+    'x-feature-name',
+    'x-latitude',
+    'x-longitude',
+    'x-request-id'
+  ],
+  credentials: false // set true only if needed
 }));
 
 // Compression middleware (gzip)
@@ -139,36 +147,48 @@ const limiter = rateLimit({
   legacyHeaders: false,
 });
 
-app.use('/api/', limiter);
+// Rate limit only real API traffic under BASE_URL (not root /health used by plain probes)
+app.use((req, res, next) => {
+  const p = req.path || '';
+  if (p === '/health' || p === '/ready') return next();
+  if (p === BASE_URL || p.startsWith(`${BASE_URL}/`)) return limiter(req, res, next);
+  return next();
+});
 
-// Health check endpoint
-app.get('/health', (req, res) => {
+const healthJson = (req, res) => {
   res.status(200).json({
     success: true,
     message: 'Server is running',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
-    environment: process.env.NODE_ENV || 'development'
+    environment: process.env.NODE_ENV || 'development',
+    baseUrl: BASE_URL,
   });
-});
+};
 
-// Readiness: process is up and MongoDB connection is ready
-app.get('/ready', (req, res) => {
+const readyJson = (req, res) => {
   const ready = mongoose.connection.readyState === 1;
   res.status(ready ? 200 : 503).json({
     success: ready,
     message: ready ? 'Database ready' : 'Database not ready',
     dbState: mongoose.connection.readyState,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    baseUrl: BASE_URL,
   });
-});
+};
+
+app.get('/health', healthJson);
+app.get('/ready', readyJson);
+// Same checks when nginx only proxies the subpath (e.g. /EducationalEternity/*)
+app.get(`${BASE_URL}/health`, healthJson);
+app.get(`${BASE_URL}/ready`, readyJson);
 
 // MongoDB connection with optimized settings
 const connectDB = async () => {
   try {
     const mongoOptions = {
       maxPoolSize: 10, // Maintain up to 10 socket connections
-      minPoolSize: 5, // Maintain at least 5 socket connections
+      minPoolSize: 0, // allow small VPS / low Atlas tiers without holding idle sockets
       serverSelectionTimeoutMS: 5000, // Keep trying to send operations for 5 seconds
       socketTimeoutMS: 45000, // Close sockets after 45 seconds of inactivity
       family: 4, // Use IPv4, skip trying IPv6
@@ -237,8 +257,7 @@ connectDB().then(() => {
   }
 });
 
-// API Routes (trim: spaced .env values like BASE_URL = /foo break path matching)
-const BASE_URL = String(process.env.BASE_URL || '/api').trim();
+// API Routes (BASE_URL defined near top of file)
 
 // Public institution check — registered on app directly so deploys cannot miss it (same URL as frontend).
 app.get(`${BASE_URL}/public/institution-status`, getPublicInstitutionStatus);
@@ -293,6 +312,7 @@ app.use(`${BASE_URL}/timetable`, timetableRoute);
 app.use(`${BASE_URL}/class-schedule`, classScheduleNewRoute);
 app.use(`${BASE_URL}/id-card`, idCardRoute);
 app.use(`${BASE_URL}/audit-logs`, auditLogRoute);
+app.use(`${BASE_URL}/teacher-attendance`, teacherAttendanceRoute);
 
 // 404 handler
 app.use((req, res) => {
@@ -307,13 +327,16 @@ app.use((req, res) => {
 // Global error handler (must be last)
 app.use(errorHandler);
 
-// Start server
-const PORT = process.env.PORT || 5000;
-const server = app.listen(PORT, () => {
-  logger.info(`Server is running on PORT: ${PORT}`);
+// Start server (bind all interfaces — required for many VPS / Docker setups)
+const PORT = Number(process.env.PORT) || 5000;
+const HOST = String(process.env.HOST || '0.0.0.0').trim() || '0.0.0.0';
+const server = app.listen(PORT, HOST, () => {
+  logger.info(`Server listening on http://${HOST}:${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.info(`Base URL: ${BASE_URL}`);
+  logger.info(`Auth login: POST http://${HOST}:${PORT}${BASE_URL}/login`);
   logger.info(`Institution guard: GET ${BASE_URL}/public/institution-status`);
+  logger.info(`Health: GET /health or GET ${BASE_URL}/health`);
 });
 
 // Graceful shutdown

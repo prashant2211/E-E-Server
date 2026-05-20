@@ -6,13 +6,13 @@ const FeeStructure = require('../models/feeStructureModel');
 const FeePayment = require('../models/feePaymentModel');
 const { AcademicYear } = require('../models/academicYearModel');
 const { logger } = require('../utils/logger');
-
-// Helper: safe number parsing
-const toAmount = (val) => {
-  if (val === null || val === undefined) return 0;
-  const n = parseFloat(String(val).toString().replace(/,/g, '').trim());
-  return Number.isNaN(n) ? 0 : n;
-};
+const {
+  toAmount,
+  sumHeadsByFrequency,
+  getHeadAmount,
+  getHeadFrequency,
+  FEE_HEADS,
+} = require('../utils/feeHeads');
 
 /**
  * Generate monthly fee entries for all active students at the start of each month.
@@ -121,8 +121,8 @@ const runMonthlyFeeGeneration = async () => {
               continue;
             }
 
-            // Assume Total represents the monthly fee
-            const monthlyAmount = toAmount(feeStructure.Total);
+            // Only monthly-frequency heads are charged each month (not yearly one-time fees)
+            const monthlyAmount = sumHeadsByFrequency(feeStructure, 'monthly');
             if (monthlyAmount <= 0) {
               logger.warn(
                 `[MonthlyFeeJob] Monthly amount is zero for institution=${instCode}, class=${className}, section=${section ||
@@ -141,19 +141,24 @@ const runMonthlyFeeGeneration = async () => {
             );
 
             // Create a system-generated feePayment record
+            const monthlyHeadKeys = FEE_HEADS.filter(
+              (h) => getHeadFrequency(feeStructure, h.key) === 'monthly'
+            ).map((h) => h.key);
+
             await FeePayment.create({
               InstutionId: instCode,
               StudentId: s.Registration_Number,
               StudentName: `${s.First_Name || ''} ${s.Last_Name || ''}`.trim(),
               Class: className,
-              TutionFee: feeStructure.TutionFee || '0',
-              LibraryFee: feeStructure.LibraryFee || '0',
-              ActivityFee: feeStructure.ActivityFee || '0',
-              ExamFee: feeStructure.ExamFee || '0',
-              UniformFee: feeStructure.UniformFee || '0',
-              ProspectusFee: feeStructure.ProspectusFee || '0',
-              TransportFee: feeStructure.TransportFee || '0',
-              OtherFee: feeStructure.OtherFee || '0',
+              TutionFee: String(getHeadAmount(feeStructure, 'TutionFee') || 0),
+              LibraryFee: String(getHeadAmount(feeStructure, 'LibraryFee') || 0),
+              ActivityFee: String(getHeadAmount(feeStructure, 'ActivityFee') || 0),
+              ExamFee: '0',
+              UniformFee: '0',
+              ProspectusFee: '0',
+              TransportFee: String(getHeadAmount(feeStructure, 'TransportFee') || 0),
+              OtherFee: String(getHeadAmount(feeStructure, 'OtherFee') || 0),
+              SelectedFeeHeads: monthlyHeadKeys,
               PaidAmount: '0',
               PendingAmount: newOutstanding.toString(),
               ScholarshipAmount: '0',
