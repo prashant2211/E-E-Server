@@ -38,20 +38,28 @@ const errorResponse = (res, message = 'Operation failed', code = 400, errors = n
  * Paginated response
  */
 const paginatedResponse = (res, data, pagination, message = 'Data retrieved successfully') => {
+  const totalRecords = Number(pagination.total) || 0;
+  const pageSize = Number(pagination.pageSize) || 10;
+  const page = Number(pagination.page) || 1;
+  const totalPages = pageSize > 0 ? Math.ceil(totalRecords / pageSize) : 0;
+
   return res.status(200).json({
     success: true,
     message,
     code: 200,
     data,
+    // Root-level total for legacy/admin UIs (e.g. Teacher list pattern)
+    totalRecords,
     pagination: {
-      currentPage: pagination.page,
-      pageSize: pagination.pageSize,
-      totalRecords: pagination.total,
-      totalPages: Math.ceil(pagination.total / pagination.pageSize),
-      hasNextPage: pagination.page < Math.ceil(pagination.total / pagination.pageSize),
-      hasPreviousPage: pagination.page > 1
+      currentPage: page,
+      pageSize,
+      totalRecords,
+      total: totalRecords,
+      totalPages,
+      hasNextPage: page < totalPages,
+      hasPreviousPage: page > 1,
     },
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
   });
 };
 
