@@ -204,6 +204,11 @@ const index = async (req, res, next) => {
       searchCondition.Class_Code = req.query.Class_Code;
     }
 
+    // Class name filter (e.g. "Class 7")
+    if (req.query.Class) {
+      searchCondition.Class = req.query.Class;
+    }
+
     // SectionCode filter
     if (req.query.SectionCode) {
       searchCondition.SectionCode = req.query.SectionCode;

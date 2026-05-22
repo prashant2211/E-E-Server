@@ -71,6 +71,9 @@ const attachProofSignedUrls = async (rows) => {
 }
 
 const {
+  generateMonthlyFeesForInstitution,
+} = require('../jobs/monthlyFeeJob')
+const {
   toAmount,
   findFeeStructure,
   findFeeStructureFromList,
@@ -85,6 +88,9 @@ const {
   getPreviousMonthlyPending,
   getPreviousBalanceCarriedForward,
   computePaymentSettlement,
+  PENDING_FEE_KEY,
+  filterStructureHeadKeys,
+  buildPendingFeeHead,
 } = require('../utils/feeHeads')
 
 const feePaymentWriteAllowed = (permissionsResult) => {
@@ -181,15 +187,28 @@ const store = async (req, res, next) => {
       })
     }
 
+    const previousBalance = getPreviousBalanceCarriedForward(priorPayments, {
+      fallback: toAmount(student.OutstandingAmount),
+    })
+
     const { amounts, total: baseTotal, monthlyTotal, yearlyTotal } = amountsForSelectedHeads(
       baseStructure,
       selectedKeys
     )
-    if (baseTotal <= 0) {
+    const collectsPendingOnly =
+      selectedKeys.includes(PENDING_FEE_KEY) && filterStructureHeadKeys(selectedKeys).length === 0
+    if (baseTotal <= 0 && !selectedKeys.includes(PENDING_FEE_KEY)) {
       return res.status(400).json({
         success: false,
         code: 400,
         message: 'Selected fee types have no amount in fee structure for this class',
+      })
+    }
+    if (collectsPendingOnly && previousBalance <= 0) {
+      return res.status(400).json({
+        success: false,
+        code: 400,
+        message: 'No pending balance to collect for this student',
       })
     }
 
@@ -197,10 +216,6 @@ const store = async (req, res, next) => {
 
     const scholarship = toAmount(ScholarshipAmount)
     const concession = toAmount(ConcessionAmount)
-
-    const previousBalance = getPreviousBalanceCarriedForward(priorPayments, {
-      fallback: toAmount(student.OutstandingAmount),
-    })
 
     const settlement = computePaymentSettlement({
       previousBalance,
@@ -335,6 +350,7 @@ const showAllPayment = async (req, res, next) => {
           Date: req.query.Date,
           ...(createdAtRange ? { createdAt: createdAtRange } : {}),
         })
+        .sort({ createdAt: -1 })
         .lean()
     }
     if (!req.query.Date) {
@@ -343,6 +359,7 @@ const showAllPayment = async (req, res, next) => {
           InstutionId: req.user.InstutionCode,
           ...(createdAtRange ? { createdAt: createdAtRange } : {}),
         })
+        .sort({ createdAt: -1 })
         .lean()
     }
 
@@ -385,20 +402,23 @@ const getAnalyticsSummary = async (req, res, next) => {
       Status: 'Success',
     }
 
-    // Helper to sum PaidAmount with optional extra match (date, class, etc.)
-    const sumPaid = async (extraMatch = {}) => {
+    // Helper to sum a numeric payment field with optional extra match (date, class, etc.)
+    const sumPaymentField = async (fieldName, extraMatch = {}) => {
       const match = { ...baseMatch, ...extraMatch }
       const result = await feePaymentModel.aggregate([
         { $match: match },
         {
           $group: {
             _id: null,
-            total: { $sum: { $toDouble: { $ifNull: ['$PaidAmount', '0'] } } },
+            total: { $sum: { $toDouble: { $ifNull: [`$${fieldName}`, '0'] } } },
           },
         },
       ])
       return result?.[0]?.total || 0
     }
+
+    const sumPaid = (extraMatch = {}) => sumPaymentField('PaidAmount', extraMatch)
+    const sumConcession = (extraMatch = {}) => sumPaymentField('ConcessionAmount', extraMatch)
 
     // Total collection for entire school (all time)
     const totalCollected = await sumPaid()
@@ -503,20 +523,26 @@ const getAnalyticsSummary = async (req, res, next) => {
 
     // If className is provided, compute class-specific stats
     if (className) {
-      const classCollected = await sumPaid({ Class: className })
-      const classTodayCollected = await sumPaid({ Class: className, Date: todayStr })
+      const classMatch = { Class: className }
+      const classCollected = await sumPaid(classMatch)
+      const classTodayCollected = await sumPaid({ ...classMatch, Date: todayStr })
+      const classTotalConcession = await sumConcession(classMatch)
 
       let classRangeCollected = 0
       if (fromDate && toDate && fromDate === toDate) {
-        classRangeCollected = await sumPaid({ Class: className, Date: fromDate })
+        classRangeCollected = await sumPaid({ ...classMatch, Date: fromDate })
       }
 
       let classPending = 0
-      allStudents
+      activeStudents
         .filter((s) => s.Class === className)
         .forEach((s) => {
           classPending += toAmount(s.OutstandingAmount)
         })
+
+      const classTotalDue = classCollected + classPending
+      const collectionRate =
+        classTotalDue > 0 ? Math.round((classCollected / classTotalDue) * 100) : 0
 
       responseData.forClass = {
         className,
@@ -524,6 +550,8 @@ const getAnalyticsSummary = async (req, res, next) => {
         todayCollected: classTodayCollected,
         rangeCollected: classRangeCollected,
         totalPending: classPending,
+        totalConcession: classTotalConcession,
+        collectionRate,
       }
     }
 
@@ -724,12 +752,18 @@ const getStudentFeeDue = async (req, res) => {
       fallback: toAmount(student?.OutstandingAmount),
     })
 
+    const pendingHead = buildPendingFeeHead(previousBalance)
+    const headsWithPending = pendingHead
+      ? [...dueContext.heads, pendingHead]
+      : dueContext.heads
+
     return res.status(200).json({
       success: true,
       code: 200,
       message: 'Student fee due details fetched successfully',
       data: {
         ...dueContext,
+        heads: headsWithPending,
         previousOutstanding: previousBalance,
         previousMonthlyPending,
         month: Month,
@@ -1418,10 +1452,66 @@ const verifyStudentPayment = async (req, res) => {
   }
 }
 
+/** Manual trigger: generate current month fees for all active students in this institution */
+const generateMonthlyFees = async (req, res) => {
+  try {
+    const instutionId = req.user?.InstutionCode
+    if (!instutionId) {
+      return res.status(401).json({
+        success: false,
+        code: 401,
+        message: 'Institution context not found',
+      })
+    }
+
+    const permissionsResult = await getPermissionSet(req)
+    if (!feePaymentWriteAllowed(permissionsResult)) {
+      return res.status(403).json({
+        success: false,
+        code: 403,
+        message: 'You do not have permission to generate monthly fees',
+      })
+    }
+
+    const result = await generateMonthlyFeesForInstitution(instutionId)
+
+    if (result.alreadyGenerated) {
+      return res.status(200).json({
+        success: true,
+        code: 200,
+        message: `Monthly fees for ${result.month} were already generated for this school.`,
+        data: result,
+      })
+    }
+
+    let message = `Generated ${result.month} monthly fees for ${result.generatedCount} student(s).`
+    if (result.skippedCount > 0) {
+      message += ` ${result.skippedCount} skipped (no class/structure or zero monthly fee).`
+    }
+    if (result.errorCount > 0) {
+      message += ` ${result.errorCount} error(s) — check logs.`
+    }
+
+    return res.status(200).json({
+      success: true,
+      code: 200,
+      message,
+      data: result,
+    })
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      message: error.message,
+      code: 500,
+    })
+  }
+}
+
 module.exports = {
   store,
   show,
   showAllPayment,
+  generateMonthlyFees,
   getAnalyticsSummary,
   getClassPendingList,
   getStudentFeeDue,
