@@ -1,6 +1,10 @@
 /**
  * Fee head definitions and helpers for structure, collection, and pending calculations.
  */
+/** Virtual fee type: prior outstanding balance (not in fee structure document). */
+const PENDING_FEE_KEY = 'PendingFee'
+const PENDING_FEE_LABEL = 'Pending Fee'
+
 const FEE_HEADS = [
   { key: 'TutionFee', label: 'Tuition Fee', defaultFrequency: 'monthly' },
   { key: 'LibraryFee', label: 'Library Fee', defaultFrequency: 'monthly' },
@@ -162,6 +166,23 @@ const legacyFeeTypeToHeads = (feeType, structure) => {
   return allHeads.map((h) => h.key)
 }
 
+const filterStructureHeadKeys = (selectedKeys) =>
+  (Array.isArray(selectedKeys) ? selectedKeys : []).filter((k) => k && k !== PENDING_FEE_KEY)
+
+const buildPendingFeeHead = (outstandingAmount) => {
+  const amount = toAmount(outstandingAmount)
+  if (amount <= 0) return null
+  return {
+    key: PENDING_FEE_KEY,
+    label: PENDING_FEE_LABEL,
+    amount,
+    frequency: 'arrears',
+    frequencyLabel: 'Outstanding balance',
+    isDue: true,
+    isPaidForPeriod: false,
+  }
+}
+
 const resolveSelectedHeadKeys = (body, structure) => {
   const explicit = parseSelectedFeeHeads(body)
   if (explicit.length > 0) return explicit
@@ -169,12 +190,13 @@ const resolveSelectedHeadKeys = (body, structure) => {
 }
 
 const amountsForSelectedHeads = (structure, selectedKeys) => {
+  const structureKeys = filterStructureHeadKeys(selectedKeys)
   const amounts = {}
   let total = 0
   let monthlyTotal = 0
   let yearlyTotal = 0
   FEE_HEADS.forEach((head) => {
-    const selected = selectedKeys.includes(head.key)
+    const selected = structureKeys.includes(head.key)
     const amt = selected ? getHeadAmount(structure, head.key) : 0
     amounts[head.key] = amt
     total += amt
@@ -197,6 +219,9 @@ const sumSelectedHeadsFromHeads = (heads, selectedKeys, frequency = null) =>
 
 const feeTypeLabelFromHeads = (selectedKeys) => {
   const labels = FEE_HEADS.filter((h) => selectedKeys.includes(h.key)).map((h) => h.label)
+  if (selectedKeys.includes(PENDING_FEE_KEY)) {
+    labels.push(PENDING_FEE_LABEL)
+  }
   return labels.length ? labels.join(', ') : 'Fee payment'
 }
 
@@ -343,7 +368,7 @@ const recomputeMonthlyArrears = (structure, payments = [], { excludePaymentId = 
 
   let monthlyPending = 0
   paid.forEach((payment) => {
-    const selectedKeys = getSelectedKeysFromPayment(payment, structure)
+    const selectedKeys = filterStructureHeadKeys(getSelectedKeysFromPayment(payment, structure))
     const { monthlyTotal, yearlyTotal } = amountsForSelectedHeads(structure, selectedKeys)
     const settlement = computePaymentSettlement({
       previousBalance: monthlyPending,
@@ -441,8 +466,12 @@ const computeInstitutionMonthlyPending = ({
 }
 
 module.exports = {
+  PENDING_FEE_KEY,
+  PENDING_FEE_LABEL,
   FEE_HEADS,
   FREQUENCY_FIELDS,
+  filterStructureHeadKeys,
+  buildPendingFeeHead,
   toAmount,
   normalizeFrequency,
   getHeadFrequency,

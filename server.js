@@ -77,7 +77,6 @@ const { getPublicInstitutionStatus } = require('./controller/publicInstitutionCo
 // Import middleware
 const errorHandler = require('./middleware/errorHandler');
 const { logger, requestLogger } = require('./utils/logger');
-const { scheduleMonthlyFeeJob } = require('./jobs/monthlyFeeJob');
 const auditLogger = require('./middleware/auditLogger');
 
 // Initialize Express app
@@ -248,13 +247,6 @@ connectDB().then(() => {
   // const { createIndexes } = require('./config/database');
   // createIndexes();
 
-  // Schedule background jobs only after successful DB connection
-  try {
-    scheduleMonthlyFeeJob();
-    logger.info('[MonthlyFeeJob] Scheduled (cron: 5 0 1 * * — 00:05 on 1st of each month)');
-  } catch (jobError) {
-    logger.error('Failed to schedule monthly fee job:', jobError);
-  }
 });
 
 // API Routes (BASE_URL defined near top of file)
