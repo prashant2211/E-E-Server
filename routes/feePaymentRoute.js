@@ -14,6 +14,12 @@ const upload = multer({
 router.get('/student-fee-due', authenticate, feePaymentController.getStudentFeeDue)
 router.get('/get-payment', authenticate, feePaymentController.show)
 router.post('/make-payment', authenticate, requireDefaultAcademicYear, feePaymentController.store)
+router.post(
+  '/generate-monthly-fees',
+  authenticate,
+  requireDefaultAcademicYear,
+  feePaymentController.generateMonthlyFees
+)
 router.post('/record-admission-fee', authenticate, feePaymentController.storeAdmissionFee)
 router.get('/get-all-payment', authenticate, feePaymentController.showAllPayment)
 
