@@ -12,6 +12,14 @@ const upload = multer({
 })
 
 router.get('/student-fee-due', authenticate, feePaymentController.getStudentFeeDue)
+router.get('/advance-fee-quote', authenticate, feePaymentController.getAdvanceFeeQuote)
+router.get('/advance-fee-records', authenticate, feePaymentController.listAdvanceFeeRecords)
+router.post(
+  '/collect-advance-fee',
+  authenticate,
+  requireDefaultAcademicYear,
+  feePaymentController.collectAdvanceFee
+)
 router.get('/get-payment', authenticate, feePaymentController.show)
 router.post('/make-payment', authenticate, requireDefaultAcademicYear, feePaymentController.store)
 router.post(
@@ -36,6 +44,7 @@ router.post('/verify-student-payment', authenticate, feePaymentController.verify
 // Analytics and reporting
 router.get('/analytics/summary', authenticate, feePaymentController.getAnalyticsSummary)
 router.get('/analytics/class-pending', authenticate, feePaymentController.getClassPendingList)
+router.get('/analytics/class-export', authenticate, feePaymentController.getClassFeeExportData)
 router.get('/analytics/student-summary', authenticate, feePaymentController.getStudentSummary)
 
 module.exports = router

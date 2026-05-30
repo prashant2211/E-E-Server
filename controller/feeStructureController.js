@@ -1,10 +1,16 @@
 const { response } = require('express')
 const feeStructureModel = require('../models/feeStructureModel')
-const { FEE_HEADS, normalizeFrequency, sumHeadsByFrequency } = require('../utils/feeHeads')
+const {
+  STANDARD_FEE_HEADS,
+  normalizeFrequency,
+  sumHeadsByFrequency,
+  buildHeadsFromStructure,
+} = require('../utils/feeHeads')
+const { serializeOtherFeeSubtypes } = require('../utils/otherFeeSubtypes')
 
 const buildFrequencyPayload = (body, existing = {}) => {
   const payload = {}
-  FEE_HEADS.forEach((head) => {
+  STANDARD_FEE_HEADS.forEach((head) => {
     const freqField = `${head.key}Frequency`
     const raw = body[freqField] !== undefined ? body[freqField] : existing[freqField]
     payload[freqField] = normalizeFrequency(raw, head.defaultFrequency)
@@ -12,21 +18,40 @@ const buildFrequencyPayload = (body, existing = {}) => {
   return payload
 }
 
-const store = (req, res, next) => {
-  const tution = Number(req.body.TutionFee || 0) || 0
-  const library = Number(req.body.LibraryFee || 0) || 0
-  const activity = Number(req.body.ActivityFee || 0) || 0
-  const exam = Number(req.body.ExamFee || 0) || 0
-  const uniform = Number(req.body.UniformFee || 0) || 0
-  const prospectus = Number(req.body.ProspectusFee || 0) || 0
-  const admission = Number(req.body.AdmissionFee || 0) || 0
-  const transport = Number(req.body.TransportFee || 0) || 0
-  const other = Number(req.body.OtherFee || 0) || 0
+const readStandardAmount = (body, key, fallback = 0) =>
+  Number(body[key] !== undefined ? body[key] : fallback) || 0
 
-  const totalfee =
-    tution + library + activity + exam + uniform + prospectus + admission + transport + other
+const resolveOtherFeeJson = (body, existing = null) => {
+  if (Array.isArray(body.OtherFeeSubtypes)) {
+    return serializeOtherFeeSubtypes(body.OtherFeeSubtypes)
+  }
+  if (body.OtherFee !== undefined && body.OtherFee !== null && body.OtherFee !== '') {
+    const raw = String(body.OtherFee).trim()
+    if (raw.startsWith('[') || raw.startsWith('{')) return raw
+    return serializeOtherFeeSubtypes([
+      {
+        name: 'Other Fee',
+        amount: Number(body.OtherFee) || 0,
+        frequency: body.OtherFeeFrequency || existing?.OtherFeeFrequency || 'monthly',
+        key: 'OtherFee',
+      },
+    ])
+  }
+  return existing?.OtherFee || '[]'
+}
 
-  const frequencyPayload = buildFrequencyPayload(req.body)
+const buildStructurePayload = (body, existing = null) => {
+  const tution = readStandardAmount(body, 'TutionFee', existing?.TutionFee ?? 0)
+  const library = readStandardAmount(body, 'LibraryFee', existing?.LibraryFee ?? 0)
+  const activity = readStandardAmount(body, 'ActivityFee', existing?.ActivityFee ?? 0)
+  const exam = readStandardAmount(body, 'ExamFee', existing?.ExamFee ?? 0)
+  const uniform = readStandardAmount(body, 'UniformFee', existing?.UniformFee ?? 0)
+  const prospectus = readStandardAmount(body, 'ProspectusFee', existing?.ProspectusFee ?? 0)
+  const admission = readStandardAmount(body, 'AdmissionFee', existing?.AdmissionFee ?? 0)
+  const transport = readStandardAmount(body, 'TransportFee', existing?.TransportFee ?? 0)
+  const otherFeeJson = resolveOtherFeeJson(body, existing)
+  const frequencyPayload = buildFrequencyPayload(body, existing || {})
+
   const structureForTotals = {
     TutionFee: tution.toString(),
     LibraryFee: library.toString(),
@@ -36,16 +61,17 @@ const store = (req, res, next) => {
     ProspectusFee: prospectus.toString(),
     AdmissionFee: admission.toString(),
     TransportFee: transport.toString(),
-    OtherFee: other.toString(),
+    OtherFee: otherFeeJson,
     ...frequencyPayload,
   }
+
   const monthlyTotal = sumHeadsByFrequency(structureForTotals, 'monthly')
   const yearlyTotal = sumHeadsByFrequency(structureForTotals, 'yearly')
+  const totalfee = buildHeadsFromStructure(structureForTotals).reduce((sum, head) => sum + head.amount, 0)
 
-  const feeStructure = new feeStructureModel({
-    InstutionId: req.user.InstutionCode,
-    Class: req.body.Class,
-    Section: req.body.Section || '',
+  return {
+    Class: body.Class ?? existing?.Class,
+    Section: body.Section !== undefined ? body.Section || '' : existing?.Section || '',
     TutionFee: tution.toString(),
     LibraryFee: library.toString(),
     ActivityFee: activity.toString(),
@@ -54,11 +80,20 @@ const store = (req, res, next) => {
     ProspectusFee: prospectus.toString(),
     AdmissionFee: admission.toString(),
     TransportFee: transport.toString(),
-    OtherFee: other.toString(),
+    OtherFee: otherFeeJson,
     Total: totalfee.toString(),
     MonthlyTotal: monthlyTotal.toString(),
     YearlyTotal: yearlyTotal.toString(),
     ...frequencyPayload,
+  }
+}
+
+const store = (req, res, next) => {
+  const payload = buildStructurePayload(req.body)
+
+  const feeStructure = new feeStructureModel({
+    InstutionId: req.user.InstutionCode,
+    ...payload,
   })
   feeStructure
     .save()
@@ -128,56 +163,11 @@ const update = async (req, res) => {
       })
     }
 
-    const tution = Number(req.body.TutionFee ?? existing.TutionFee ?? 0) || 0
-    const library = Number(req.body.LibraryFee ?? existing.LibraryFee ?? 0) || 0
-    const activity = Number(req.body.ActivityFee ?? existing.ActivityFee ?? 0) || 0
-    const exam = Number(req.body.ExamFee ?? existing.ExamFee ?? 0) || 0
-    const uniform = Number(req.body.UniformFee ?? existing.UniformFee ?? 0) || 0
-    const prospectus = Number(req.body.ProspectusFee ?? existing.ProspectusFee ?? 0) || 0
-    const admission = Number(req.body.AdmissionFee ?? existing.AdmissionFee ?? 0) || 0
-    const transport = Number(req.body.TransportFee ?? existing.TransportFee ?? 0) || 0
-    const other = Number(req.body.OtherFee ?? existing.OtherFee ?? 0) || 0
-
-    const totalfee =
-      tution + library + activity + exam + uniform + prospectus + admission + transport + other
-
-    const frequencyPayload = buildFrequencyPayload(req.body, existing)
-    const structureForTotals = {
-      TutionFee: tution.toString(),
-      LibraryFee: library.toString(),
-      ActivityFee: activity.toString(),
-      ExamFee: exam.toString(),
-      UniformFee: uniform.toString(),
-      ProspectusFee: prospectus.toString(),
-      AdmissionFee: admission.toString(),
-      TransportFee: transport.toString(),
-      OtherFee: other.toString(),
-      ...frequencyPayload,
-    }
-    const monthlyTotal = sumHeadsByFrequency(structureForTotals, 'monthly')
-    const yearlyTotal = sumHeadsByFrequency(structureForTotals, 'yearly')
+    const payload = buildStructurePayload(req.body, existing)
 
     const updated = await feeStructureModel.findByIdAndUpdate(
       id,
-      {
-        $set: {
-          Class: req.body.Class ?? existing.Class,
-          Section: req.body.Section !== undefined ? req.body.Section || '' : existing.Section,
-          TutionFee: tution.toString(),
-          LibraryFee: library.toString(),
-          ActivityFee: activity.toString(),
-          ExamFee: exam.toString(),
-          UniformFee: uniform.toString(),
-          ProspectusFee: prospectus.toString(),
-          AdmissionFee: admission.toString(),
-          TransportFee: transport.toString(),
-          OtherFee: other.toString(),
-          Total: totalfee.toString(),
-          MonthlyTotal: monthlyTotal.toString(),
-          YearlyTotal: yearlyTotal.toString(),
-          ...frequencyPayload,
-        },
-      },
+      { $set: payload },
       { new: true }
     )
 

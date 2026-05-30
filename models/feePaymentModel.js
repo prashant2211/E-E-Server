@@ -49,6 +49,11 @@ const feePaymentSchema = new Schema(
     OtherFee: {
       type: String,
     },
+    /** JSON array of other-fee subtypes paid in this transaction */
+    OtherFeeBreakdown: {
+      type: String,
+      default: '',
+    },
     // Amounts
     PaidAmount: {
       type: String, // store as string but treat as number in logic
@@ -126,6 +131,29 @@ const feePaymentSchema = new Schema(
       default: '',
     },
     RejectionReason: {
+      type: String,
+      default: '',
+    },
+    /** Advance / prepaid fee — months covered by this payment */
+    IsAdvancePayment: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
+    AdvanceMonthsCovered: {
+      type: [String],
+      default: undefined,
+    },
+    AdvanceStartMonth: {
+      type: String,
+      default: '',
+    },
+    AdvanceCreditRemaining: {
+      type: String,
+      default: '0',
+    },
+    /** Monthly arrears before an advance payment (advance does not reduce arrears) */
+    PreviousPendingAtPayment: {
       type: String,
       default: '',
     },

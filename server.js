@@ -133,17 +133,35 @@ if (process.env.NODE_ENV !== 'production') {
 app.use(requestLogger);
 app.use(auditLogger);
 
-// Rate limiting
+// Rate limiting — ERP UIs can burst many API calls; tune via RATE_LIMIT_MAX / RATE_LIMIT_WINDOW_MS
+const isProduction = process.env.NODE_ENV === 'production';
+const rateLimitWindowMs = Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000;
+const rateLimitMax =
+  Number(process.env.RATE_LIMIT_MAX) || (isProduction ? 500 : 2000);
+
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: process.env.RATE_LIMIT_MAX || 100, // limit each IP to 100 requests per windowMs
+  windowMs: rateLimitWindowMs,
+  max: rateLimitMax,
   message: {
     success: false,
     message: 'Too many requests from this IP, please try again later.',
-    code: 429
+    code: 429,
   },
   standardHeaders: true,
   legacyHeaders: false,
+  skip: (req) => {
+    if (process.env.RATE_LIMIT_DISABLED === '1' || process.env.RATE_LIMIT_DISABLED === 'true') {
+      return true;
+    }
+    if (isProduction) return false;
+    const ip = String(req.ip || '');
+    return (
+      ip === '127.0.0.1' ||
+      ip === '::1' ||
+      ip === '::ffff:127.0.0.1' ||
+      ip.endsWith('127.0.0.1')
+    );
+  },
 });
 
 // Rate limit only real API traffic under BASE_URL (not root /health used by plain probes)
@@ -329,6 +347,11 @@ const server = app.listen(PORT, HOST, () => {
   logger.info(`Auth login: POST http://${HOST}:${PORT}${BASE_URL}/login`);
   logger.info(`Institution guard: GET ${BASE_URL}/public/institution-status`);
   logger.info(`Health: GET /health or GET ${BASE_URL}/health`);
+  if (process.env.RATE_LIMIT_DISABLED === '1' || process.env.RATE_LIMIT_DISABLED === 'true') {
+    logger.info('Rate limit: disabled (RATE_LIMIT_DISABLED)');
+  } else {
+    logger.info(`Rate limit: ${rateLimitMax} requests / ${Math.round(rateLimitWindowMs / 60000)} min per IP`);
+  }
 });
 
 // Graceful shutdown

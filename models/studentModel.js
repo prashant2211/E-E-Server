@@ -92,6 +92,11 @@ const studentSchema = new Schema({
         type: String,
         required: true
     },
+    /** Unused advance fee credit (partial month remainder) */
+    AdvanceFeeCredit: {
+        type: String,
+        default: '0',
+    },
     // Optional student photo stored in S3
     PhotoUrl: {
         type: String,

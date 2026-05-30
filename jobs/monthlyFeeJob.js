@@ -10,8 +10,12 @@ const {
   sumHeadsByFrequency,
   getHeadAmount,
   getHeadFrequency,
-  FEE_HEADS,
+  buildHeadsFromStructure,
+  computeDueContext,
+  paymentCountsAsPaid,
+  isMonthAdvanceCovered,
 } = require('../utils/feeHeads');
+const { serializeOtherFeeBreakdown } = require('../utils/otherFeeSubtypes');
 
 /**
  * Monthly fee generation (manual only — Fee Management “Generate” button).
@@ -105,34 +109,64 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
         continue;
       }
 
-      const prevOutstanding = toAmount(s.OutstandingAmount);
-      const newOutstanding = prevOutstanding + monthlyAmount;
+      const studentPayments = await FeePayment.find({
+        InstutionId: instCode,
+        StudentId: s.Registration_Number,
+        ...(academicYearName ? { AcademicYear: academicYearName } : {}),
+      }).lean();
 
-      await Student.updateOne(
-        { _id: s._id },
-        { $set: { OutstandingAmount: newOutstanding.toString() } }
+      if (isMonthAdvanceCovered(studentPayments, currentMonth)) {
+        result.skippedCount += 1;
+        continue;
+      }
+
+      const dueContext = computeDueContext({
+        structure: feeStructure,
+        payments: studentPayments,
+        month: currentMonth,
+        academicYear: academicYearName,
+      });
+      if (dueContext.monthlyDue <= 0) {
+        result.skippedCount += 1;
+        continue;
+      }
+
+      const monthlyHeads = buildHeadsFromStructure(feeStructure).filter(
+        (h) => h.frequency === 'monthly' && h.amount > 0
       );
+      const monthlyHeadKeys = monthlyHeads.map((h) => h.key);
+      const otherBreakdown = monthlyHeads
+        .filter((h) => h.isOtherSubtype)
+        .map((h) => ({
+          key: h.key,
+          name: h.label,
+          amount: h.amount,
+          frequency: h.frequency,
+        }));
+      const otherMonthlyTotal = otherBreakdown.reduce((sum, item) => sum + item.amount, 0);
 
-      const monthlyHeadKeys = FEE_HEADS.filter(
-        (h) => getHeadFrequency(feeStructure, h.key) === 'monthly'
-      ).map((h) => h.key);
+      const getStandardMonthly = (key) => {
+        const head = monthlyHeads.find((h) => h.key === key && !h.isOtherSubtype);
+        return head ? head.amount : 0;
+      };
 
       await FeePayment.create({
         InstutionId: instCode,
         StudentId: s.Registration_Number,
         StudentName: `${s.First_Name || ''} ${s.Last_Name || ''}`.trim(),
         Class: className,
-        TutionFee: String(getHeadAmount(feeStructure, 'TutionFee') || 0),
-        LibraryFee: String(getHeadAmount(feeStructure, 'LibraryFee') || 0),
-        ActivityFee: String(getHeadAmount(feeStructure, 'ActivityFee') || 0),
+        TutionFee: String(getStandardMonthly('TutionFee')),
+        LibraryFee: String(getStandardMonthly('LibraryFee')),
+        ActivityFee: String(getStandardMonthly('ActivityFee')),
         ExamFee: '0',
         UniformFee: '0',
         ProspectusFee: '0',
-        TransportFee: String(getHeadAmount(feeStructure, 'TransportFee') || 0),
-        OtherFee: String(getHeadAmount(feeStructure, 'OtherFee') || 0),
+        TransportFee: String(getStandardMonthly('TransportFee')),
+        OtherFee: String(otherMonthlyTotal),
+        OtherFeeBreakdown: serializeOtherFeeBreakdown(otherBreakdown),
         SelectedFeeHeads: monthlyHeadKeys,
         PaidAmount: '0',
-        PendingAmount: newOutstanding.toString(),
+        PendingAmount: String(monthlyAmount),
         ScholarshipAmount: '0',
         ConcessionAmount: '0',
         Month: currentMonth,
