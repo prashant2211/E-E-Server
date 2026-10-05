@@ -48,8 +48,19 @@ const toAmount = (val) => {
 }
 
 const normalizeFrequency = (value, fallback = 'monthly') => {
-  const v = String(value || fallback).trim().toLowerCase()
-  if (v === 'yearly' || v === 'annual' || v === 'once' || v === 'one-time' || v === 'onetime') {
+  const v = String(value ?? fallback ?? '').trim().toLowerCase()
+  if (!v) return fallback === 'yearly' ? 'yearly' : 'monthly'
+  if (
+    v === 'yearly' ||
+    v === 'annual' ||
+    v === 'annually' ||
+    v === 'once' ||
+    v === 'one-time' ||
+    v === 'onetime' ||
+    v === 'once per year' ||
+    v === 'once/year' ||
+    v.includes('year')
+  ) {
     return 'yearly'
   }
   return 'monthly'
@@ -82,39 +93,51 @@ const getHeadAmount = (structure, headKey) => {
   return toAmount(structure[headKey])
 }
 
+const structuresForClass = (structures, className) => {
+  const classNorm = String(className || '').trim()
+  if (!classNorm || !Array.isArray(structures)) return []
+  const exact = structures.filter((fs) => String(fs.Class || '').trim() === classNorm)
+  if (exact.length) return exact
+  const lower = classNorm.toLowerCase()
+  return structures.filter((fs) => String(fs.Class || '').trim().toLowerCase() === lower)
+}
+
 /** Sync lookup from a preloaded structures array (analytics / batch jobs). */
 const findFeeStructureFromList = (structures, className, section = '') => {
-  if (!className || !Array.isArray(structures)) return null
+  const pool = structuresForClass(structures, className)
+  if (!pool.length) return null
   const sectionNorm = String(section || '').trim()
   if (sectionNorm) {
-    const bySection = structures.find(
-      (fs) => fs.Class === className && String(fs.Section || '').trim() === sectionNorm
-    )
+    const bySection = pool.find((fs) => String(fs.Section || '').trim() === sectionNorm)
     if (bySection) return bySection
+    const sectionLower = sectionNorm.toLowerCase()
+    const bySectionCI = pool.find(
+      (fs) => String(fs.Section || '').trim().toLowerCase() === sectionLower
+    )
+    if (bySectionCI) return bySectionCI
   }
-  return (
-    structures.find(
-      (fs) => fs.Class === className && !String(fs.Section || '').trim()
-    ) || null
-  )
+  return pool.find((fs) => !String(fs.Section || '').trim()) || pool[0] || null
 }
 
 const findFeeStructure = async (feeStructureModel, instutionId, className, section = '') => {
   if (!instutionId || !className) return null
+  const classNorm = String(className).trim()
   const sectionNorm = String(section || '').trim()
   if (sectionNorm) {
     const bySection = await feeStructureModel
-      .findOne({ InstutionId: instutionId, Class: className, Section: sectionNorm })
+      .findOne({ InstutionId: instutionId, Class: classNorm, Section: sectionNorm })
       .lean()
     if (bySection) return bySection
   }
-  return feeStructureModel
+  const classLevel = await feeStructureModel
     .findOne({
       InstutionId: instutionId,
-      Class: className,
+      Class: classNorm,
       $or: [{ Section: '' }, { Section: { $exists: false } }, { Section: null }],
     })
     .lean()
+  if (classLevel) return classLevel
+  return feeStructureModel.findOne({ InstutionId: instutionId, Class: classNorm }).lean()
 }
 
 const buildHeadsFromStructure = (structure) => {
@@ -143,15 +166,13 @@ const buildHeadsFromStructure = (structure) => {
   return [...standard, ...otherSubtypes]
 }
 
-const sumHeadsByFrequency = (structure, frequency) => {
-  const computed = buildHeadsFromStructure(structure)
+const getMarkedMonthlyHeads = (structure) =>
+  buildHeadsFromStructure(structure).filter((h) => h.frequency === 'monthly' && h.amount > 0)
+
+const sumHeadsByFrequency = (structure, frequency) =>
+  buildHeadsFromStructure(structure)
     .filter((h) => h.frequency === frequency)
     .reduce((sum, h) => sum + h.amount, 0)
-  if (computed > 0) return computed
-  if (frequency === 'monthly') return toAmount(structure?.MonthlyTotal)
-  if (frequency === 'yearly') return toAmount(structure?.YearlyTotal)
-  return 0
-}
 
 /** Sum fee head amounts on a payment record for one billing cycle (monthly / yearly). */
 const sumHeadsByFrequencyOnPayment = (payment, structure, frequency) => {
@@ -454,33 +475,209 @@ const getSelectedKeysFromPayment = (payment, structure) => {
   return keys
 }
 
+const listMonthsInclusive = (fromKey, toKey) => {
+  const from = String(fromKey || '').trim()
+  const to = String(toKey || '').trim()
+  if (!from || !to || from > to) return []
+  const months = []
+  let cursor = from
+  let guard = 0
+  while (cursor <= to && guard < 36) {
+    months.push(cursor)
+    cursor = addMonthsToKey(cursor, 1)
+    guard += 1
+  }
+  return months
+}
+
+/** SYSTEM-billed months before the current collection month. */
+const getPastBilledMonths = (payments = [], currentMonth = '') => {
+  const current = String(currentMonth || currentMonthKey()).trim()
+  return [
+    ...new Set(
+      (Array.isArray(payments) ? payments : [])
+        .filter((p) => isSystemMonthlyGeneration(p))
+        .map((p) => String(p.Month || '').trim())
+        .filter((m) => m && m < current)
+    ),
+  ].sort()
+}
+
+const hasSuccessfulMonthlyPaymentForMonth = (payments = [], month = '', structure = null) => {
+  const monthKey = String(month || '').trim()
+  if (!monthKey) return false
+  return (Array.isArray(payments) ? payments : []).filter(paymentCountsAsPaid).some((p) => {
+    if (p?.IsAdvancePayment) return false
+    if (String(p.Month || '').trim() !== monthKey) return false
+    const keys = filterStructureHeadKeys(getSelectedKeysFromPayment(p, structure))
+    return keys.some((k) => getHeadFrequency(structure, k) === 'monthly')
+  })
+}
+
+const paymentCreditsMonthlyLedger = (payment, structure) => {
+  const paidPlusDiscount =
+    toAmount(payment?.PaidAmount) +
+    toAmount(payment?.ScholarshipAmount) +
+    toAmount(payment?.ConcessionAmount)
+  const explicitHeads = Array.isArray(payment?.SelectedFeeHeads)
+    ? payment.SelectedFeeHeads.map((k) => String(k).trim()).filter(Boolean)
+    : []
+  const includesPending = explicitHeads.includes(PENDING_FEE_KEY)
+  let selectedKeys = filterStructureHeadKeys(getSelectedKeysFromPayment(payment, structure))
+  if (!explicitHeads.length) {
+    selectedKeys = selectedKeys.filter((k) => getHeadFrequency(structure, k) === 'monthly')
+  }
+  const { monthlyTotal, yearlyTotal } = amountsForSelectedHeads(structure, selectedKeys)
+  const yearlyPart = explicitHeads.length ? yearlyTotal : 0
+  return {
+    includesPending,
+    monthlySelected: monthlyTotal,
+    credit: Math.max(0, paidPlusDiscount - yearlyPart),
+  }
+}
+
 /**
- * Replay payment history with monthly/yearly split so legacy PendingAmount (often included yearly) is corrected.
+ * Apply a payment to the monthly ledger only. Yearly heads never stay in outstanding.
  */
-const recomputeMonthlyArrears = (structure, payments = [], { excludePaymentId = null } = {}) => {
+const monthlyOutstandingAfterPayment = ({
+  previousBalance = 0,
+  monthlyTotal = 0,
+  yearlyTotal = 0,
+  scholarship = 0,
+  concession = 0,
+  paid = 0,
+}) => {
+  const settlement = computePaymentSettlement({
+    previousBalance,
+    monthlyTotal,
+    yearlyTotal: 0,
+    scholarship,
+    concession,
+    paid,
+  })
+  return settlement.totalRemainingAfterPayment
+}
+
+/**
+ * Previous-month monthly arrears only.
+ * Each generated month is owed once. Later "Pending Fee" collections reduce leftover arrears.
+ * Yearly heads never enter this number.
+ */
+const computeMonthlyArrears = (structure, payments = [], currentMonth = '') => {
   if (!structure) return 0
+  const monthlyAmount = sumHeadsByFrequency(structure, 'monthly')
+  if (monthlyAmount <= 0) return 0
 
-  const paid = payments
-    .filter(paymentCountsAsPaid)
-    .filter((p) => !excludePaymentId || String(p._id || '') !== String(excludePaymentId))
-    .sort((a, b) => paymentSortTime(a) - paymentSortTime(b))
+  const relevant = Array.isArray(payments) ? payments : []
+  const current = String(currentMonth || currentMonthKey()).trim()
+  let arrears = 0
 
-  let monthlyPending = 0
-  paid.forEach((payment) => {
-    const selectedKeys = filterStructureHeadKeys(getSelectedKeysFromPayment(payment, structure))
-    const { monthlyTotal, yearlyTotal } = amountsForSelectedHeads(structure, selectedKeys)
-    const settlement = computePaymentSettlement({
-      previousBalance: monthlyPending,
-      monthlyTotal,
-      yearlyTotal,
-      scholarship: payment.ScholarshipAmount,
-      concession: payment.ConcessionAmount,
-      paid: payment.PaidAmount,
-    })
-    monthlyPending = settlement.totalRemainingAfterPayment
+  getPastBilledMonths(relevant, current).forEach((monthKey) => {
+    if (isMonthAdvanceCovered(relevant, monthKey)) return
+    const monthPays = relevant.filter(
+      (p) =>
+        paymentCountsAsPaid(p) &&
+        !p?.IsAdvancePayment &&
+        String(p.Month || '').trim() === monthKey
+    )
+    if (!monthPays.length) {
+      arrears += monthlyAmount
+      return
+    }
+    const credited = monthPays.reduce((sum, p) => {
+      const { credit, monthlySelected } = paymentCreditsMonthlyLedger(p, structure)
+      const towardThisMonth = monthlySelected > 0 ? Math.min(credit, monthlyAmount) : 0
+      return sum + towardThisMonth
+    }, 0)
+    arrears += Math.max(0, monthlyAmount - credited)
   })
 
-  return monthlyPending
+  relevant
+    .filter((p) => paymentCountsAsPaid(p) && !p?.IsAdvancePayment)
+    .forEach((p) => {
+      const { includesPending, monthlySelected, credit } = paymentCreditsMonthlyLedger(p, structure)
+      if (!includesPending) return
+      arrears = Math.max(0, arrears - Math.max(0, credit - monthlySelected))
+    })
+
+  return arrears
+}
+
+const recomputeMonthlyArrears = (
+  structure,
+  payments = [],
+  { excludePaymentId = null, month = '' } = {}
+) => {
+  const relevant = (Array.isArray(payments) ? payments : []).filter(
+    (p) => !excludePaymentId || String(p._id || '') !== String(excludePaymentId)
+  )
+  return computeMonthlyArrears(structure, relevant, month || currentMonthKey())
+}
+
+/** Total monthly outstanding = previous unpaid months + unpaid current-month monthly heads. */
+const computeTotalMonthlyOutstanding = (
+  structure,
+  payments = [],
+  { excludePaymentId = null, month = '', academicYear = '' } = {}
+) => {
+  const relevant = (Array.isArray(payments) ? payments : []).filter(
+    (p) => !excludePaymentId || String(p._id || '') !== String(excludePaymentId)
+  )
+  const current = String(month || currentMonthKey()).trim()
+  const arrears = computeMonthlyArrears(structure, relevant, current)
+  const { monthlyDue } = computeDueContext({
+    structure,
+    payments: relevant,
+    month: current,
+    academicYear,
+  })
+  return {
+    arrears,
+    currentMonthDue: monthlyDue,
+    outstanding: arrears + monthlyDue,
+  }
+}
+
+/**
+ * Amount the student needs to pay now for this school only:
+ * unpaid SYSTEM-billed previous months + unpaid current-month monthly fee.
+ * Yearly heads never enter this number.
+ * student.OutstandingAmount is not used — it historically mixed yearly and stale totals.
+ */
+const computeStudentTotalPayable = (
+  structure,
+  payments = [],
+  { excludePaymentId = null, month = '', academicYear = '' } = {}
+) => {
+  if (!structure) {
+    return { arrears: 0, currentMonthDue: 0, outstanding: 0 }
+  }
+  return computeTotalMonthlyOutstanding(structure, payments, {
+    excludePaymentId,
+    month,
+    academicYear,
+  })
+}
+
+/** Reduce the student running outstanding after a collection. Yearly heads do not reduce it. */
+const applyPaymentToStudentOutstanding = ({
+  storedOutstanding = 0,
+  paid = 0,
+  scholarship = 0,
+  concession = 0,
+  yearlyAmount = 0,
+  currentMonthAlreadyInStored = false,
+  includesPending = false,
+}) => {
+  const credit = Math.max(
+    0,
+    toAmount(paid) + toAmount(scholarship) + toAmount(concession) - toAmount(yearlyAmount)
+  )
+  const stored = toAmount(storedOutstanding)
+  if (currentMonthAlreadyInStored || includesPending) {
+    return Math.max(0, stored - credit)
+  }
+  return stored
 }
 
 /**
@@ -528,6 +725,8 @@ const sanitizeMonthlyFallback = (
 
 /**
  * Monthly pending only — never includes optional yearly fees.
+ * Unpaid previous months (after fee generation) become Pending Fee.
+ * Yearly heads stay on the current-year due list and do not carry forward.
  */
 const getPreviousMonthlyPending = (
   payments = [],
@@ -540,20 +739,12 @@ const getPreviousMonthlyPending = (
   } = {}
 ) => {
   if (structure) {
-    const replayed = recomputeMonthlyArrears(structure, payments, { excludePaymentId })
-    const paid = payments.filter(
-      (p) =>
-        paymentCountsAsPaid(p) &&
-        (!excludePaymentId || String(p._id || '') !== String(excludePaymentId))
-    )
-    if (paid.length > 0) {
-      return replayed
-    }
-    return sanitizeMonthlyFallback(structure, fallback, {
-      currentMonthDue,
-      payments,
-      month,
+    const payable = computeStudentTotalPayable(structure, payments, {
+      excludePaymentId,
+      month: month || currentMonthKey(),
+      storedOutstanding: fallback,
     })
+    return Math.max(0, payable.outstanding - payable.currentMonthDue)
   }
 
   const paid = payments
@@ -583,7 +774,7 @@ const computeInstitutionMonthlyPending = ({
   let studentsWithCurrentMonthPending = 0
 
   students.forEach((student) => {
-    const reg = student.Registration_Number
+    const reg = String(student.Registration_Number || '').trim()
     if (!reg) return
     const structure = findFeeStructureFromList(structures, student.Class, student.Section || '')
     if (!structure) return
@@ -602,6 +793,32 @@ const computeInstitutionMonthlyPending = ({
   })
 
   return { currentMonthPending, currentMonthExpected, studentsWithCurrentMonthPending }
+}
+
+/** School/class total due: previous arrears + unpaid current-month monthly fee. */
+const sumStudentsPayable = ({
+  students = [],
+  structures = [],
+  paymentsByStudent = new Map(),
+  month = '',
+  academicYear = '',
+}) => {
+  let totalPayable = 0
+  let studentsWithDue = 0
+  students.forEach((student) => {
+    const reg = String(student.Registration_Number || '').trim()
+    if (!reg) return
+    const structure = findFeeStructureFromList(structures, student.Class, student.Section || '')
+    const payments = paymentsByStudent.get(reg) || []
+    const { outstanding } = computeStudentTotalPayable(structure, payments, {
+      month,
+      academicYear,
+      storedOutstanding: student.OutstandingAmount,
+    })
+    if (outstanding > 0) studentsWithDue += 1
+    totalPayable += outstanding
+  })
+  return { totalPayable, studentsWithDue }
 }
 
 const currentMonthKey = () => {
@@ -820,9 +1037,11 @@ module.exports = {
   findFeeStructure,
   findFeeStructureFromList,
   buildHeadsFromStructure,
+  getMarkedMonthlyHeads,
   sumHeadsByFrequency,
   sumHeadsByFrequencyOnPayment,
   computeInstitutionMonthlyPending,
+  sumStudentsPayable,
   parseSelectedFeeHeads,
   legacyFeeTypeToHeads,
   resolveSelectedHeadKeys,
@@ -835,8 +1054,14 @@ module.exports = {
   paymentCountsAsPaid,
   getSelectedKeysFromPayment,
   recomputeMonthlyArrears,
+  computeMonthlyArrears,
+  computeTotalMonthlyOutstanding,
+  computeStudentTotalPayable,
+  applyPaymentToStudentOutstanding,
   sanitizeMonthlyFallback,
   getPreviousMonthlyPending,
+  monthlyOutstandingAfterPayment,
+  getPastBilledMonths,
   getPreviousBalanceCarriedForward,
   computePaymentSettlement,
   currentMonthKey,

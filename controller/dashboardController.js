@@ -9,7 +9,8 @@ const examScheduleModel = require('../models/examScheduleModel')
 const announcementModel = require('../models/announcementModel')
 const marksheetModel = require('../models/studentMarksheetModel')
 const sectionModel = require('../models/sectionModel')
-const { sumHeadsByFrequency } = require('../utils/feeHeads')
+const { findFeeStructureFromList, computeStudentTotalPayable, currentMonthKey } = require('../utils/feeHeads')
+const { requireTenantInstitution } = require('../utils/institutionContext')
 
 const getDashboardData = async (req, res, next) => {
     if (req.user.UserType != 'SuperAdmin' && req.user.UserType != 'Admin') {
@@ -22,7 +23,8 @@ const getDashboardData = async (req, res, next) => {
 
     const currentDate = new Date();
     const today = currentDate.toLocaleDateString();
-    const instutionCode = req.user.InstutionCode;
+    const instutionCode = requireTenantInstitution(req, res)
+    if (!instutionCode) return
 
     console.log('Dashboard request received for institution:', instutionCode);
 
@@ -35,6 +37,7 @@ const getDashboardData = async (req, res, next) => {
         let activeUsersRecord = [];
         let inactiveUsersRecord = [];
         let paymentMode = [];
+        let allInstitutionFeePayments = [];
         let sections = [];
         let todayAttendance = 0;
         let yesterdayAttendance = 0;
@@ -129,6 +132,7 @@ const getDashboardData = async (req, res, next) => {
             
             // Fetch all payments first (we'll filter by Date field in JavaScript)
             paymentMode = await feePaymentModel.find(paymentQuery).lean();
+            allInstitutionFeePayments = paymentMode
             
             // Filter by payment Date field (string) if date filter is active
             if (dateFilter !== 'all') {
@@ -334,85 +338,48 @@ const getDashboardData = async (req, res, next) => {
         console.log('Last Month Revenue:', lastMonthAmount);
         console.log('============================');
 
-        // Calculate pending fee: Current period unpaid fees + Pending amounts from students who paid
+        // Outstanding = previous unpaid monthly months + current unpaid monthly heads (yearly excluded)
         try {
-            const parseAmount = (val) => {
-                if (val === null || val === undefined || val === '') return 0;
-                const cleaned = String(val).replace(/,/g, '').trim();
-                const parsed = parseFloat(cleaned);
-                return isNaN(parsed) ? 0 : Math.round(parsed * 100) / 100;
-            };
-
-            // Get all fee structures for quick lookup
             const feeStructures = await feeStructureModel.find({ InstutionId: instutionCode }).lean();
-            const feeStructureMap = new Map();
-            feeStructures.forEach(fs => {
-                const key = `${fs.Class || ''}_${fs.Section || ''}`;
-                feeStructureMap.set(key, fs);
-            });
-
-            // Get all payments in the selected period
-            const periodPayments = paymentMode.filter(p => {
-                if (!p.Payment_Date) return false;
-                try {
-                    const paymentDate = new Date(p.Payment_Date);
-                    return paymentDate >= startDate && paymentDate <= endDate;
-                } catch (e) {
-                    return false;
-                }
-            });
-
-            // Create a map of students who paid in this period
-            const studentsWhoPaid = new Set();
-            periodPayments.forEach(p => {
-                if (p.StudentId && (p.Status === 'Success' || p.Status === 'success')) {
-                    studentsWhoPaid.add(p.StudentId);
-                }
-            });
+            const paymentsByStudent = new Map();
+            const ledgerPayments = Array.isArray(allInstitutionFeePayments) ? allInstitutionFeePayments : paymentMode
+            ledgerPayments.forEach((p) => {
+                const id = String(p.StudentId || '')
+                if (!id) return
+                if (!paymentsByStudent.has(id)) paymentsByStudent.set(id, [])
+                paymentsByStudent.get(id).push(p)
+            })
 
             const studentsWithOutstanding = [];
-            
-            // Calculate pending fee for each active student
+            const outstandingMonth = currentMonthKey()
+
             for (const student of studentRecord) {
-                if (!student.Status) continue; // Skip inactive students
+                if (!student.Status) continue
 
-                const studentId = student.Registration_Number;
-                const studentClass = student.Class || '';
-                const studentSection = student.Section || '';
-                const key = `${studentClass}_${studentSection}`;
-                
-                // Monthly fee from structure (monthly heads only — excludes yearly one-time fees)
-                let monthlyFee = 0;
-                const structure = feeStructureMap.get(key) || feeStructureMap.get(`${studentClass}_`);
-                if (structure) {
-                    monthlyFee = sumHeadsByFrequency(structure, 'monthly');
-                }
+                const structure = findFeeStructureFromList(
+                    feeStructures,
+                    student.Class || '',
+                    student.Section || ''
+                )
 
-                // Check if student paid in the selected period
-                const hasPaidInPeriod = studentsWhoPaid.has(studentId);
-                
-                if (!hasPaidInPeriod && monthlyFee > 0) {
-                    // Student hasn't paid for current period - add monthly fee to pending
-                    totalPendingFee += monthlyFee;
-                    studentsWithPendingFee++;
+                const outstanding = computeStudentTotalPayable(
+                    structure,
+                    paymentsByStudent.get(String(student.Registration_Number || '')) || [],
+                    {
+                        month: outstandingMonth,
+                        storedOutstanding: student.OutstandingAmount,
+                    }
+                ).outstanding
+
+                if (outstanding > 0) {
+                    totalPendingFee += outstanding
+                    studentsWithPendingFee++
                     studentsWithOutstanding.push({
-                        registrationNumber: studentId,
+                        registrationNumber: student.Registration_Number,
                         name: `${student.First_Name || ''} ${student.Last_Name || ''}`.trim(),
-                        outstanding: monthlyFee,
-                        type: 'unpaid_period'
-                    });
-                }
-
-                // Add outstanding amount from students who paid but still have pending
-                const outstanding = parseAmount(student.OutstandingAmount);
-                if (outstanding > 0 && hasPaidInPeriod) {
-                    totalPendingFee += outstanding;
-                    studentsWithOutstanding.push({
-                        registrationNumber: studentId,
-                        name: `${student.First_Name || ''} ${student.Last_Name || ''}`.trim(),
-                        outstanding: outstanding,
-                        type: 'partial_payment'
-                    });
+                        outstanding,
+                        type: 'monthly_outstanding'
+                    })
                 }
             }
 

@@ -42,9 +42,23 @@ router.get('/pending-student-payments', authenticate, feePaymentController.listP
 router.post('/verify-student-payment', authenticate, feePaymentController.verifyStudentPayment)
 
 // Analytics and reporting
-router.get('/analytics/summary', authenticate, feePaymentController.getAnalyticsSummary)
+router.get(
+  '/analytics/summary',
+  authenticate,
+  (req, res, next) => {
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+    })
+    next()
+  },
+  feePaymentController.getAnalyticsSummary
+)
 router.get('/analytics/class-pending', authenticate, feePaymentController.getClassPendingList)
 router.get('/analytics/class-export', authenticate, feePaymentController.getClassFeeExportData)
 router.get('/analytics/student-summary', authenticate, feePaymentController.getStudentSummary)
+router.get('/demand-slip', authenticate, feePaymentController.getFeeDemandSlips)
+router.post('/demand-slips', authenticate, feePaymentController.getFeeDemandSlips)
 
 module.exports = router

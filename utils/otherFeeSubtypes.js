@@ -5,8 +5,19 @@ const toAmt = (val) => {
 }
 
 const normFreq = (value, fallback = 'monthly') => {
-  const v = String(value || fallback).trim().toLowerCase()
-  if (v === 'yearly' || v === 'annual' || v === 'once' || v === 'one-time' || v === 'onetime') {
+  const v = String(value ?? fallback ?? '').trim().toLowerCase()
+  if (!v) return fallback === 'yearly' ? 'yearly' : 'monthly'
+  if (
+    v === 'yearly' ||
+    v === 'annual' ||
+    v === 'annually' ||
+    v === 'once' ||
+    v === 'one-time' ||
+    v === 'onetime' ||
+    v === 'once per year' ||
+    v === 'once/year' ||
+    v.includes('year')
+  ) {
     return 'yearly'
   }
   return 'monthly'

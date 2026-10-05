@@ -4,6 +4,8 @@ const feePaymentModel = require('../models/feePaymentModel')
 const feeStructureModel = require('../models/feeStructureModel')
 const studentModel = require('../models/studentModel')
 const admissionModel = require('../models/admissionModel')
+const instutionBankInfoModel = require('../models/instutionBankInfo')
+const { SystemSettings } = require('../models/academicYearModel')
 const { resolveAcademicYearScope } = require('../utils/academicYearScope')
 const { resolveOwnStudentRegistration } = require('../utils/studentPortalAccess')
 const { getPermissionSet } = require('./permissionAssinment')
@@ -85,10 +87,14 @@ const {
   sumHeadsByFrequency,
   sumHeadsByFrequencyOnPayment,
   computeInstitutionMonthlyPending,
+  sumStudentsPayable,
   paymentCountsAsPaid,
   getPreviousMonthlyPending,
-  computePaymentSettlement,
+  computeTotalMonthlyOutstanding,
+  computeStudentTotalPayable,
+  applyPaymentToStudentOutstanding,
   PENDING_FEE_KEY,
+  PENDING_FEE_LABEL,
   filterStructureHeadKeys,
   buildPendingFeeHead,
   FEE_HEADS,
@@ -105,6 +111,7 @@ const {
   isSystemMonthlyGeneration,
 } = require('../utils/feeHeads')
 const { serializeOtherFeeBreakdown } = require('../utils/otherFeeSubtypes')
+const { requireTenantInstitution } = require('../utils/institutionContext')
 
 const feePaymentWriteAllowed = (permissionsResult) => {
   const raw = String(permissionsResult?.feePayment || '')
@@ -116,6 +123,173 @@ const feePaymentReadAllowed = (permissionsResult) => {
   const raw = String(permissionsResult?.feePayment || '')
   const parts = raw.split('-')
   return parts.includes('R') || parts.includes('RA') || parts.includes('W') || parts.includes('E')
+}
+
+const normalizeCollectorUserType = (userType) =>
+  String(userType || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+
+const isOfficialFeeCollector = (user) => {
+  const userType = normalizeCollectorUserType(user?.UserType)
+  return (
+    userType === 'admin' ||
+    userType === 'superadmin' ||
+    userType === 'accountant' ||
+    userType === 'accountscoordinator' ||
+    userType === 'accountcoordinator'
+  )
+}
+
+const collectionStatusForUser = (user) => (isOfficialFeeCollector(user) ? 'Paid' : 'Partial')
+
+const isStudentUser = (user) => normalizeCollectorUserType(user?.UserType) === 'student'
+
+const canIssueFeeDemandSlip = (user) => isOfficialFeeCollector(user) || isStudentUser(user)
+
+const resolveDemandSlipRegistrations = (req, requestedIds = []) => {
+  const ids = (Array.isArray(requestedIds) ? requestedIds : [requestedIds])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean)
+
+  if (isStudentUser(req.user)) {
+    const own = String(req.user?.MemberId || '').trim()
+    if (!own) {
+      return {
+        error: {
+          status: 400,
+          message: 'Your account is not linked to a student registration number.',
+        },
+      }
+    }
+    if (ids.length && ids.some((id) => id.toLowerCase() !== own.toLowerCase())) {
+      return {
+        error: {
+          status: 403,
+          message: 'You can only download your own fee demand slip.',
+        },
+      }
+    }
+    return { registrationNumbers: [own] }
+  }
+
+  if (isOfficialFeeCollector(req.user)) {
+    if (!ids.length) {
+      return {
+        error: { status: 400, message: 'Select at least one student for the demand slip.' },
+      }
+    }
+    return { registrationNumbers: [...new Set(ids)] }
+  }
+
+  return {
+    error: {
+      status: 403,
+      message: 'Only Admin, Accountant, or the student can download a fee demand slip.',
+    },
+  }
+}
+
+const loadDemandPaymentInstructions = async (instutionId) => {
+  const bank = await instutionBankInfoModel
+    .findOne({ InstutionId: instutionId, status: true })
+    .lean()
+    .catch(() => null)
+  const bankDoc =
+    bank ||
+    (await instutionBankInfoModel.findOne({ InstutionId: instutionId }).lean().catch(() => null))
+
+  let qrUrl = ''
+  try {
+    const settings = await SystemSettings.findOne({ InstutionCode: instutionId }).lean()
+    const qrKey = settings?.Settings?.Documents?.FeeQRKey
+    if (qrKey) {
+      qrUrl = (await getFeeProofSignedUrl(qrKey)) || settings?.Settings?.Documents?.FeeQRUrl || ''
+    } else {
+      qrUrl = settings?.Settings?.Documents?.FeeQRUrl || ''
+    }
+  } catch {
+    qrUrl = ''
+  }
+
+  if (!bankDoc && !qrUrl) return null
+  return {
+    bankName: bankDoc?.bankName || '',
+    accountHolderName: bankDoc?.accountHolderName || '',
+    accountNumber: bankDoc?.accountNumber || '',
+    ifsc: bankDoc?.IFSCCode || '',
+    branchName: bankDoc?.branchName || '',
+    accountType: bankDoc?.accountType || '',
+    upiId: bankDoc?.upiId || '',
+    upiNumber: bankDoc?.upiNumber || '',
+    qrUrl,
+  }
+}
+
+const buildDemandSlipForStudent = ({
+  student,
+  structure,
+  payments,
+  month,
+  academicYear,
+}) => {
+  const payable = computeStudentTotalPayable(structure, payments, {
+    month,
+    academicYear,
+    storedOutstanding: student.OutstandingAmount,
+  })
+  const dueContext = structure
+    ? computeDueContext({
+        structure,
+        payments,
+        month,
+        academicYear,
+      })
+    : { heads: [], monthlyDue: 0 }
+
+  const currentHeads = (dueContext.heads || [])
+    .filter((h) => h.frequency === 'monthly' && toAmount(h.amount) > 0)
+    .map((h) => ({
+      key: h.key,
+      label: h.label,
+      amount: toAmount(h.amount),
+      frequency: 'monthly',
+      status: h.isPaidForPeriod ? 'Paid' : 'Due',
+    }))
+
+  const lineItems = []
+  if (payable.arrears > 0) {
+    lineItems.push({
+      key: PENDING_FEE_KEY,
+      label: PENDING_FEE_LABEL,
+      amount: payable.arrears,
+      frequency: 'arrears',
+      status: 'Due',
+    })
+  }
+  currentHeads
+    .filter((h) => h.status === 'Due')
+    .forEach((h) => lineItems.push(h))
+
+  return {
+    student: {
+      id: student.Registration_Number,
+      name: `${student.First_Name || ''} ${student.Last_Name || ''}`.trim(),
+      class: student.Class || '',
+      section: student.Section || '',
+      fatherName: student.Father_Name || '',
+      contact: student.Contact_Number || '',
+    },
+    month,
+    monthLabel: formatMonthLabel(month),
+    academicYear: academicYear || '',
+    previousPending: payable.arrears,
+    currentMonthDue: payable.currentMonthDue,
+    totalPayable: payable.outstanding,
+    lineItems,
+    currentHeads,
+  }
 }
 
 // Record a fee payment (offline/online) and update outstanding
@@ -250,16 +424,6 @@ const store = async (req, res, next) => {
     const scholarship = toAmount(ScholarshipAmount)
     const concession = toAmount(ConcessionAmount)
 
-    const settlement = computePaymentSettlement({
-      previousBalance,
-      monthlyTotal,
-      yearlyTotal,
-      scholarship,
-      concession,
-      paid,
-    })
-    const { totalRemainingAfterPayment } = settlement
-
     const otherWithAdmission =
       toAmount(amounts.OtherFee) + toAmount(amounts.AdmissionFee)
 
@@ -278,10 +442,10 @@ const store = async (req, res, next) => {
       OtherFee: String(otherWithAdmission),
       OtherFeeBreakdown: serializeOtherFeeBreakdown(otherFeeBreakdown),
       PaidAmount: paid.toString(),
-      PendingAmount: totalRemainingAfterPayment.toString(),
+      PendingAmount: '0',
       ScholarshipAmount: scholarship.toString(),
       ConcessionAmount: concession.toString(),
-      Month: Month || '',
+      Month: monthKey,
       AcademicYear: academicYearName,
       FeeType: feeTypeLabel || FeeType || 'Fee payment',
       SelectedFeeHeads: selectedKeys,
@@ -290,12 +454,34 @@ const store = async (req, res, next) => {
       Date: date,
       Time: time,
       Status: paid > 0 ? 'Success' : 'Pending',
+      CollectionStatus: collectionStatusForUser(req.user),
+      CollectedByUserType: String(req.user?.UserType || ''),
     })
 
+    const hasSystemCurrent = [...priorPayments, feePatment].some((p) =>
+      isSystemMonthlyGeneration(p, monthKey)
+    )
+    const yearlyOnThis = baseStructure
+      ? sumHeadsByFrequencyOnPayment(feePatment, baseStructure, 'yearly')
+      : 0
+    const nextOutstanding = applyPaymentToStudentOutstanding({
+      storedOutstanding: student.OutstandingAmount,
+      paid,
+      scholarship,
+      concession,
+      yearlyAmount: yearlyOnThis,
+      currentMonthAlreadyInStored: hasSystemCurrent,
+      includesPending: selectedKeys.includes(PENDING_FEE_KEY),
+    })
+    const payableAfter = computeStudentTotalPayable(baseStructure, [...priorPayments, feePatment], {
+      month: monthKey,
+      academicYear: academicYearName,
+      storedOutstanding: nextOutstanding,
+    })
+    feePatment.PendingAmount = String(payableAfter.outstanding)
     await feePatment.save()
 
-    // Monthly outstanding only (yearly optional fees do not carry forward)
-    student.OutstandingAmount = totalRemainingAfterPayment.toString()
+    student.OutstandingAmount = String(payableAfter.outstanding)
     await student.save()
 
     res.status(201).json({
@@ -374,13 +560,15 @@ const show = async (req, res, next) => {
 
 const showAllPayment = async (req, res, next) => {
   try {
+    const instutionId = requireTenantInstitution(req, res)
+    if (!instutionId) return
     const scope = await resolveAcademicYearScope(req)
     const createdAtRange = scope ? { $gte: scope.from, $lte: scope.to } : null
     let feePatmentRecord
     if (req.query.Date) {
       feePatmentRecord = await feePaymentModel
         .find({
-          InstutionId: req.user.InstutionCode,
+          InstutionId: instutionId,
           Date: req.query.Date,
           ...(createdAtRange ? { createdAt: createdAtRange } : {}),
         })
@@ -390,7 +578,7 @@ const showAllPayment = async (req, res, next) => {
     if (!req.query.Date) {
       feePatmentRecord = await feePaymentModel
         .find({
-          InstutionId: req.user.InstutionCode,
+          InstutionId: instutionId,
           ...(createdAtRange ? { createdAt: createdAtRange } : {}),
         })
         .sort({ createdAt: -1 })
@@ -417,14 +605,8 @@ const showAllPayment = async (req, res, next) => {
 // Analytics: school and class-wise collection and pending summary
 const getAnalyticsSummary = async (req, res, next) => {
   try {
-    const instutionId = req.user?.InstutionCode
-    if (!instutionId) {
-      return res.status(401).json({
-        success: false,
-        code: 401,
-        message: 'Institution context not found',
-      })
-    }
+    const instutionId = requireTenantInstitution(req, res)
+    if (!instutionId) return
 
     const { fromDate, toDate, class: className } = req.query
 
@@ -453,9 +635,12 @@ const getAnalyticsSummary = async (req, res, next) => {
 
     const sumPaid = (extraMatch = {}) => sumPaymentField('PaidAmount', extraMatch)
     const sumConcession = (extraMatch = {}) => sumPaymentField('ConcessionAmount', extraMatch)
+    const sumScholarship = (extraMatch = {}) => sumPaymentField('ScholarshipAmount', extraMatch)
 
     // Total collection for entire school (all time)
     const totalCollected = await sumPaid()
+    const totalScholarship = await sumScholarship()
+    const totalConcession = await sumConcession()
 
     // Today's collection
     const todayCollected = await sumPaid({ Date: todayStr })
@@ -470,14 +655,10 @@ const getAnalyticsSummary = async (req, res, next) => {
       }
     }
 
-    // Pending for entire school (from student outstanding — cumulative)
-    const allStudents = await studentModel.find({ InstutionCode: instutionId }).select(
-      'OutstandingAmount Class Section Registration_Number Status'
-    )
-    let totalPending = 0
-    allStudents.forEach((s) => {
-      totalPending += toAmount(s.OutstandingAmount)
-    })
+    const allStudents = await studentModel
+      .find({ InstutionCode: instutionId })
+      .select('OutstandingAmount Class Section Registration_Number Status')
+      .lean()
 
     // Current calendar month: monthly fee expected minus collected (monthly heads only)
     const monthParam =
@@ -487,28 +668,45 @@ const getAnalyticsSummary = async (req, res, next) => {
     const scope = await resolveAcademicYearScope(req)
     const academicYearName = scope?.yearDoc?.Year_Name || ''
 
-    const activeStudents = allStudents.filter((s) => s.Status !== false)
+    const activeStudents = allStudents.filter(
+      (s) =>
+        s.Status === true &&
+        String(s.InstutionCode || instutionId).trim() === instutionId &&
+        String(s.Registration_Number || '').trim()
+    )
+    const schoolRegs = new Set(
+      activeStudents.map((s) => String(s.Registration_Number || '').trim()).filter(Boolean)
+    )
     const structures = await feeStructureModel.find({ InstutionId: instutionId }).lean()
+    const tenantStructures = structures.filter(
+      (fs) => String(fs.InstutionId || '').trim() === instutionId
+    )
     const studentByReg = new Map(
-      activeStudents.map((s) => [String(s.Registration_Number || ''), s])
+      activeStudents.map((s) => [String(s.Registration_Number || '').trim(), s])
     )
 
     const paymentFilter = {
       InstutionId: instutionId,
-      Status: 'Success',
-      ...(scope ? { createdAt: { $gte: scope.from, $lte: scope.to } } : {}),
+      ...(schoolRegs.size ? { StudentId: { $in: [...schoolRegs] } } : { StudentId: '__none__' }),
+      $or: [
+        { Status: 'Success' },
+        { PaymentMode: 'SYSTEM', FeeType: 'Monthly' },
+      ],
     }
-    const scopedPayments = await feePaymentModel
-      .find(paymentFilter)
-      .select(
-        'StudentId Class PaidAmount VerificationStatus Status Month AcademicYear TutionFee LibraryFee ActivityFee ExamFee UniformFee ProspectusFee TransportFee OtherFee'
-      )
-      .lean()
+    const scopedPayments = schoolRegs.size
+      ? await feePaymentModel
+          .find(paymentFilter)
+          .select(
+            'StudentId Class PaidAmount VerificationStatus Status Month AcademicYear TutionFee LibraryFee ActivityFee ExamFee UniformFee ProspectusFee TransportFee OtherFee PaymentMode FeeType SelectedFeeHeads IsAdvancePayment ScholarshipAmount ConcessionAmount AdvanceMonthsCovered InstutionId'
+          )
+          .lean()
+      : []
 
     const paymentsByStudent = new Map()
-    scopedPayments.filter(paymentCountsAsPaid).forEach((p) => {
-      const id = String(p.StudentId || '')
-      if (!id) return
+    scopedPayments.forEach((p) => {
+      if (String(p.InstutionId || '').trim() !== instutionId) return
+      const id = String(p.StudentId || '').trim()
+      if (!id || !schoolRegs.has(id)) return
       if (!paymentsByStudent.has(id)) paymentsByStudent.set(id, [])
       paymentsByStudent.get(id).push(p)
     })
@@ -519,11 +717,21 @@ const getAnalyticsSummary = async (req, res, next) => {
       studentsWithCurrentMonthPending,
     } = computeInstitutionMonthlyPending({
       students: activeStudents,
-      structures,
+      structures: tenantStructures,
       paymentsByStudent,
       month: monthParam,
       academicYear: academicYearName,
     })
+
+    const { totalPayable, studentsWithDue } = sumStudentsPayable({
+      students: activeStudents,
+      structures: tenantStructures,
+      paymentsByStudent,
+      month: monthParam,
+      academicYear: academicYearName,
+    })
+    // This logged-in school only (never other institutions)
+    const totalPending = totalPayable
 
     let currentMonthCollected = 0
     scopedPayments
@@ -532,10 +740,10 @@ const getAnalyticsSummary = async (req, res, next) => {
           paymentCountsAsPaid(p) && String(p.Month || '') === monthParam
       )
       .forEach((p) => {
-        const stu = studentByReg.get(String(p.StudentId || ''))
+        const stu = studentByReg.get(String(p.StudentId || '').trim())
         const structure = stu
-          ? findFeeStructureFromList(structures, stu.Class, stu.Section || '')
-          : findFeeStructureFromList(structures, p.Class, '')
+          ? findFeeStructureFromList(tenantStructures, stu.Class, stu.Section || '')
+          : findFeeStructureFromList(tenantStructures, p.Class, '')
         if (structure) {
           currentMonthCollected += sumHeadsByFrequencyOnPayment(p, structure, 'monthly')
         } else {
@@ -548,11 +756,15 @@ const getAnalyticsSummary = async (req, res, next) => {
       todayCollected,
       rangeCollected,
       totalPending,
+      totalScholarship,
+      totalConcession,
       currentMonth: monthParam,
       currentMonthPending,
       currentMonthExpected,
       currentMonthCollected,
       studentsWithCurrentMonthPending,
+      studentsWithDue,
+      calculatedAt: new Date().toISOString(),
     }
 
     // If className is provided, compute class-specific stats
@@ -561,18 +773,21 @@ const getAnalyticsSummary = async (req, res, next) => {
       const classCollected = await sumPaid(classMatch)
       const classTodayCollected = await sumPaid({ ...classMatch, Date: todayStr })
       const classTotalConcession = await sumConcession(classMatch)
+      const classTotalScholarship = await sumScholarship(classMatch)
 
       let classRangeCollected = 0
       if (fromDate && toDate && fromDate === toDate) {
         classRangeCollected = await sumPaid({ ...classMatch, Date: fromDate })
       }
 
-      let classPending = 0
-      activeStudents
-        .filter((s) => s.Class === className)
-        .forEach((s) => {
-          classPending += toAmount(s.OutstandingAmount)
-        })
+      const classStudents = activeStudents.filter((s) => s.Class === className)
+      const { totalPayable: classPending } = sumStudentsPayable({
+        students: classStudents,
+        structures: tenantStructures,
+        paymentsByStudent,
+        month: monthParam,
+        academicYear: academicYearName,
+      })
 
       const classTotalDue = classCollected + classPending
       const collectionRate =
@@ -585,10 +800,16 @@ const getAnalyticsSummary = async (req, res, next) => {
         rangeCollected: classRangeCollected,
         totalPending: classPending,
         totalConcession: classTotalConcession,
+        totalScholarship: classTotalScholarship,
         collectionRate,
       }
     }
 
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate',
+      Pragma: 'no-cache',
+      Expires: '0',
+    })
     res.status(200).json({
       success: true,
       code: 200,
@@ -607,14 +828,8 @@ const getAnalyticsSummary = async (req, res, next) => {
 // Class-wise pending and paid list
 const getClassPendingList = async (req, res, next) => {
   try {
-    const instutionId = req.user?.InstutionCode
-    if (!instutionId) {
-      return res.status(401).json({
-        success: false,
-        code: 401,
-        message: 'Institution context not found',
-      })
-    }
+    const instutionId = requireTenantInstitution(req, res)
+    if (!instutionId) return
 
     const { class: className, section } = req.query
     if (!className) {
@@ -633,6 +848,8 @@ const getClassPendingList = async (req, res, next) => {
       studentFilter.Section = section
     }
 
+    studentFilter.Status = true
+
     const students = await studentModel
       .find(studentFilter)
       .select('First_Name Last_Name Registration_Number Class Section OutstandingAmount')
@@ -646,32 +863,61 @@ const getClassPendingList = async (req, res, next) => {
       })
     }
 
-    // Get total paid per student from fee payments
     const registrations = students.map((s) => s.Registration_Number)
-    const paymentsAgg = await feePaymentModel.aggregate([
-      {
-        $match: {
+    const monthKey = currentMonthKey()
+    const scope = await resolveAcademicYearScope(req)
+    const academicYearName = scope?.yearDoc?.Year_Name || ''
+    const [paymentsAgg, studentPayments, structures] = await Promise.all([
+      feePaymentModel.aggregate([
+        {
+          $match: {
+            InstutionId: instutionId,
+            StudentId: { $in: registrations },
+            Status: 'Success',
+          },
+        },
+        {
+          $group: {
+            _id: '$StudentId',
+            totalPaid: { $sum: { $toDouble: { $ifNull: ['$PaidAmount', '0'] } } },
+          },
+        },
+      ]),
+      feePaymentModel
+        .find({
           InstutionId: instutionId,
           StudentId: { $in: registrations },
-          Status: 'Success',
-        },
-      },
-      {
-        $group: {
-          _id: '$StudentId',
-          totalPaid: { $sum: { $toDouble: { $ifNull: ['$PaidAmount', '0'] } } },
-        },
-      },
+          $or: [
+            { Status: 'Success' },
+            { PaymentMode: 'SYSTEM', FeeType: 'Monthly' },
+          ],
+        })
+        .lean(),
+      feeStructureModel.find({ InstutionId: instutionId }).lean(),
     ])
 
     const paidMap = new Map()
     paymentsAgg.forEach((p) => {
-      paidMap.set(p._id, p.totalPaid)
+      paidMap.set(String(p._id || '').trim(), p.totalPaid)
+    })
+    const paymentsByStudent = new Map()
+    studentPayments.forEach((p) => {
+      const id = String(p.StudentId || '').trim()
+      if (!id) return
+      if (!paymentsByStudent.has(id)) paymentsByStudent.set(id, [])
+      paymentsByStudent.get(id).push(p)
     })
 
     const result = students.map((s) => {
-      const totalPaid = paidMap.get(s.Registration_Number) || 0
-      const pending = toAmount(s.OutstandingAmount)
+      const reg = String(s.Registration_Number || '').trim()
+      const totalPaid = paidMap.get(reg) || paidMap.get(s.Registration_Number) || 0
+      const structure = findFeeStructureFromList(structures, s.Class, s.Section || '')
+      const studentPays = paymentsByStudent.get(reg) || []
+      const pending = computeStudentTotalPayable(structure, studentPays, {
+        month: monthKey,
+        academicYear: academicYearName,
+        storedOutstanding: s.OutstandingAmount,
+      }).outstanding
       return {
         studentId: s.Registration_Number,
         name: `${s.First_Name || ''} ${s.Last_Name || ''}`.trim(),
@@ -702,14 +948,8 @@ const getClassPendingList = async (req, res, next) => {
  */
 const getStudentFeeDue = async (req, res) => {
   try {
-    const instutionId = req.user?.InstutionCode
-    if (!instutionId) {
-      return res.status(401).json({
-        success: false,
-        code: 401,
-        message: 'Institution context not found',
-      })
-    }
+    const instutionId = requireTenantInstitution(req, res)
+    if (!instutionId) return
 
     const permissionsResult = await getPermissionSet(req)
     if (!feePaymentReadAllowed(permissionsResult)) {
@@ -777,12 +1017,12 @@ const getStudentFeeDue = async (req, res) => {
       .select('OutstandingAmount')
       .lean()
 
-    const previousBalance = getPreviousMonthlyPending(payments, {
-      structure,
-      fallback: toAmount(student?.OutstandingAmount),
-      currentMonthDue: dueContext.monthlyDue,
+    const payable = computeStudentTotalPayable(structure, payments, {
       month: Month,
+      academicYear: academicYearName,
+      storedOutstanding: student?.OutstandingAmount,
     })
+    const previousBalance = Math.max(0, payable.outstanding - payable.currentMonthDue)
 
     const pendingHead = buildPendingFeeHead(previousBalance)
     const headsWithPending = pendingHead
@@ -798,6 +1038,8 @@ const getStudentFeeDue = async (req, res) => {
         heads: headsWithPending,
         previousOutstanding: previousBalance,
         previousMonthlyPending: previousBalance,
+        outstandingAmount: payable.outstanding,
+        currentMonthDue: payable.currentMonthDue,
         month: Month,
         academicYear: academicYearName,
       },
@@ -877,7 +1119,27 @@ const getStudentSummary = async (req, res, next) => {
         pendingVerificationTotal += toAmount(p.PaidAmount)
       }
     })
-    const pending = toAmount(student.OutstandingAmount)
+    const structure = await findFeeStructure(
+      feeStructureModel,
+      instutionId,
+      student.Class,
+      student.Section || ''
+    )
+    const monthKey = currentMonthKey()
+    const outstandingBreakdown = structure
+      ? computeStudentTotalPayable(structure, payments, {
+          month: monthKey,
+          storedOutstanding: student.OutstandingAmount,
+        })
+      : { outstanding: toAmount(student.OutstandingAmount), currentMonthDue: 0 }
+    const pending = outstandingBreakdown.outstanding
+    const currentMonthPending = structure
+      ? computeDueContext({
+          structure,
+          payments,
+          month: monthKey,
+        }).monthlyDue
+      : 0
 
     res.status(200).json({
       success: true,
@@ -893,6 +1155,7 @@ const getStudentSummary = async (req, res, next) => {
         summary: {
           totalPaid,
           pending,
+          currentMonthPending,
           pendingVerificationTotal,
         },
         payments,
@@ -1058,6 +1321,8 @@ const storeAdmissionFee = async (req, res) => {
       Date: date,
       Time: time,
       Status: 'Success',
+      CollectionStatus: collectionStatusForUser(req.user),
+      CollectedByUserType: String(req.user?.UserType || ''),
     })
 
     await feeRow.save()
@@ -1261,6 +1526,8 @@ const studentSubmitPayment = async (req, res) => {
       Date: date,
       Time: time,
       Status: 'Pending',
+      CollectionStatus: 'Partial',
+      CollectedByUserType: String(req.user?.UserType || 'Student'),
       VerificationStatus: 'Pending',
       StudentSubmittedPayment: true,
       SelectedFeeHeads: resolveSelectedHeadKeys(
@@ -1445,48 +1712,51 @@ const verifyStudentPayment = async (req, res) => {
       sectionName
     )
 
-    const selectedKeys = resolveSelectedHeadKeys(
-      { SelectedFeeHeads: payment.SelectedFeeHeads, FeeType: payment.FeeType },
-      baseStructure
-    )
-    const { monthlyTotal, yearlyTotal } = amountsForSelectedHeads(
-      baseStructure || {},
-      selectedKeys
-    )
-
     const monthKey =
       String(payment.Month || '').trim() ||
       `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`
-    const dueContext = computeDueContext({
-      structure: baseStructure,
-      payments: priorPayments,
-      month: monthKey,
-      academicYear: academicYearName,
-    })
-    const previousBalance = getPreviousMonthlyPending(priorPayments, {
-      structure: baseStructure,
-      excludePaymentId: payment._id,
-      fallback: toAmount(student.OutstandingAmount),
-      currentMonthDue: dueContext.monthlyDue,
-      month: monthKey,
-    })
-
-    const settlement = computePaymentSettlement({
-      previousBalance,
-      monthlyTotal,
-      yearlyTotal,
-      scholarship: toAmount(payment.ScholarshipAmount),
-      concession: toAmount(payment.ConcessionAmount),
-      paid,
-    })
-
-    student.OutstandingAmount = settlement.totalRemainingAfterPayment.toString()
-    await student.save()
-
-    payment.PendingAmount = settlement.totalRemainingAfterPayment.toString()
     payment.AcademicYear = payment.AcademicYear || academicYearName
     payment.Status = 'Success'
+    payment.CollectionStatus = collectionStatusForUser(req.user)
+    payment.CollectedByUserType = String(req.user?.UserType || payment.CollectedByUserType || '')
     payment.VerificationStatus = 'Approved'
+
+    const paymentsAfterApprove = priorPayments.map((p) =>
+      String(p._id) === String(payment._id)
+        ? {
+            ...p,
+            Status: 'Success',
+            VerificationStatus: 'Approved',
+            SelectedFeeHeads: payment.SelectedFeeHeads,
+            PaidAmount: payment.PaidAmount,
+          }
+        : p
+    )
+    const hasSystemCurrent = paymentsAfterApprove.some((p) =>
+      isSystemMonthlyGeneration(p, monthKey)
+    )
+    const selectedKeys = Array.isArray(payment.SelectedFeeHeads) ? payment.SelectedFeeHeads : []
+    const yearlyOnThis = baseStructure
+      ? sumHeadsByFrequencyOnPayment(payment, baseStructure, 'yearly')
+      : 0
+    const nextOutstanding = applyPaymentToStudentOutstanding({
+      storedOutstanding: student.OutstandingAmount,
+      paid: toAmount(payment.PaidAmount),
+      scholarship: toAmount(payment.ScholarshipAmount),
+      concession: toAmount(payment.ConcessionAmount),
+      yearlyAmount: yearlyOnThis,
+      currentMonthAlreadyInStored: hasSystemCurrent,
+      includesPending: selectedKeys.includes(PENDING_FEE_KEY),
+    })
+    const payableAfter = computeStudentTotalPayable(baseStructure, paymentsAfterApprove, {
+      month: monthKey,
+      academicYear: academicYearName,
+      storedOutstanding: nextOutstanding,
+    })
+    student.OutstandingAmount = String(payableAfter.outstanding)
+    await student.save()
+
+    payment.PendingAmount = String(payableAfter.outstanding)
     payment.VerifiedAt = new Date()
     payment.VerifiedByName = verifierName
     payment.VerifiedByMemberId = String(req.user.MemberId || '')
@@ -1830,6 +2100,8 @@ const collectAdvanceFee = async (req, res) => {
       Date: date,
       Time: time,
       Status: 'Success',
+      CollectionStatus: collectionStatusForUser(req.user),
+      CollectedByUserType: String(req.user?.UserType || ''),
       IsAdvancePayment: true,
       AdvanceMonthsCovered: monthsCovered,
       AdvanceStartMonth: monthsCovered[0] || monthKey,
@@ -2083,7 +2355,7 @@ const getClassFeeExportData = async (req, res) => {
 
     const paymentsByStudent = new Map()
     payments.forEach((p) => {
-      const id = String(p.StudentId || '')
+      const id = String(p.StudentId || '').trim()
       if (!id) return
       if (!paymentsByStudent.has(id)) paymentsByStudent.set(id, [])
       paymentsByStudent.get(id).push(p)
@@ -2097,7 +2369,7 @@ const getClassFeeExportData = async (req, res) => {
     let totalGenerated = 0
     let totalPaidMonthlyForMonth = 0
     const studentOutstandingRows = students.map((s) => {
-      const reg = s.Registration_Number
+      const reg = String(s.Registration_Number || '').trim()
       const studentPayments = paymentsByStudent.get(reg) || []
       const structure = findFeeStructureFromList(structures, s.Class, s.Section || '')
       const monthlyStructure = structure ? sumHeadsByFrequency(structure, 'monthly') : 0
@@ -2132,7 +2404,13 @@ const getClassFeeExportData = async (req, res) => {
       const totalPaidAllTime = studentPayments
         .filter((p) => paymentCountsAsPaid(p) && !isSystemMonthlyGeneration(p))
         .reduce((sum, p) => sum + toAmount(p.PaidAmount), 0)
-      const outstanding = toAmount(s.OutstandingAmount)
+      const outstanding = structure
+        ? computeStudentTotalPayable(structure, studentPayments, {
+            month: monthParam,
+            academicYear: academicYearName,
+            storedOutstanding: s.OutstandingAmount,
+          }).outstanding
+        : toAmount(s.OutstandingAmount)
       const advanceCredit = toAmount(s.AdvanceFeeCredit)
 
       return {
@@ -2237,6 +2515,125 @@ const getClassFeeExportData = async (req, res) => {
   }
 }
 
+const getFeeDemandSlips = async (req, res) => {
+  try {
+    const instutionId = requireTenantInstitution(req, res)
+    if (!instutionId) return
+
+    if (!canIssueFeeDemandSlip(req.user)) {
+      return res.status(403).json({
+        success: false,
+        code: 403,
+        message: 'Only Admin, Accountant, or the student can download a fee demand slip.',
+      })
+    }
+
+    const requestedIds = req.body?.studentIds || req.query.studentIds || req.query.studentId
+    const idList = Array.isArray(requestedIds)
+      ? requestedIds
+      : String(requestedIds || '')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+
+    const resolved = resolveDemandSlipRegistrations(req, idList)
+    if (resolved.error) {
+      return res.status(resolved.error.status).json({
+        success: false,
+        code: resolved.error.status,
+        message: resolved.error.message,
+      })
+    }
+
+    const registrationNumbers = resolved.registrationNumbers.slice(0, 200)
+    const month =
+      String(req.body?.month || req.query.month || req.query.Month || '').trim() || currentMonthKey()
+
+    const scope = await resolveAcademicYearScope(req)
+    const academicYearName = scope?.yearDoc?.Year_Name || ''
+
+    const [students, structures, payments, paymentInstructions] = await Promise.all([
+      studentModel
+        .find({
+          InstutionCode: instutionId,
+          Registration_Number: { $in: registrationNumbers },
+        })
+        .select(
+          'First_Name Last_Name Registration_Number Class Section Father_Name Contact_Number OutstandingAmount Status'
+        )
+        .lean(),
+      feeStructureModel.find({ InstutionId: instutionId }).lean(),
+      feePaymentModel
+        .find({
+          InstutionId: instutionId,
+          StudentId: { $in: registrationNumbers },
+        })
+        .lean(),
+      loadDemandPaymentInstructions(instutionId),
+    ])
+
+    const studentMap = new Map(
+      students.map((s) => [String(s.Registration_Number || '').trim(), s])
+    )
+    const paymentsByStudent = new Map()
+    payments.forEach((p) => {
+      const id = String(p.StudentId || '').trim()
+      if (!id) return
+      if (!paymentsByStudent.has(id)) paymentsByStudent.set(id, [])
+      paymentsByStudent.get(id).push(p)
+    })
+
+    const slips = []
+    const missing = []
+    registrationNumbers.forEach((reg) => {
+      const student = studentMap.get(reg)
+      if (!student) {
+        missing.push(reg)
+        return
+      }
+      const structure = findFeeStructureFromList(structures, student.Class, student.Section || '')
+      slips.push(
+        buildDemandSlipForStudent({
+          student,
+          structure,
+          payments: paymentsByStudent.get(reg) || [],
+          month,
+          academicYear: academicYearName,
+        })
+      )
+    })
+
+    if (!slips.length) {
+      return res.status(404).json({
+        success: false,
+        code: 404,
+        message: missing.length
+          ? `Student not found: ${missing.join(', ')}`
+          : 'No demand slips to generate',
+      })
+    }
+
+    return res.status(200).json({
+      success: true,
+      code: 200,
+      message: 'Fee demand slip data fetched successfully',
+      data: {
+        month,
+        academicYear: academicYearName,
+        paymentInstructions,
+        slips,
+        missing,
+      },
+    })
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      code: 500,
+      message: error.message,
+    })
+  }
+}
+
 module.exports = {
   store,
   show,
@@ -2254,5 +2651,6 @@ module.exports = {
   studentSubmitPayment,
   listPendingStudentPayments,
   verifyStudentPayment,
+  getFeeDemandSlips,
 }
 

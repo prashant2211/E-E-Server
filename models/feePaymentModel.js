@@ -100,6 +100,17 @@ const feePaymentSchema = new Schema(
     Status: {
       type: String, // Success, Pending, Failed
     },
+    /** Paid = admin/accountant collection; Partial = any other user type */
+    CollectionStatus: {
+      type: String,
+      enum: ['Paid', 'Partial'],
+      default: 'Paid',
+      index: true,
+    },
+    CollectedByUserType: {
+      type: String,
+      default: '',
+    },
     /** Student-initiated UPI/online payments awaiting staff verification */
     VerificationStatus: {
       type: String,

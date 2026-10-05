@@ -6,14 +6,11 @@ const FeePayment = require('../models/feePaymentModel');
 const { AcademicYear } = require('../models/academicYearModel');
 const { logger } = require('../utils/logger');
 const {
-  toAmount,
-  sumHeadsByFrequency,
-  getHeadAmount,
-  getHeadFrequency,
-  buildHeadsFromStructure,
+  getMarkedMonthlyHeads,
   computeDueContext,
-  paymentCountsAsPaid,
   isMonthAdvanceCovered,
+  getPreviousMonthlyPending,
+  computeStudentTotalPayable,
 } = require('../utils/feeHeads');
 const { serializeOtherFeeBreakdown } = require('../utils/otherFeeSubtypes');
 
@@ -103,7 +100,8 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
         continue;
       }
 
-      const monthlyAmount = sumHeadsByFrequency(feeStructure, 'monthly');
+      const monthlyHeads = getMarkedMonthlyHeads(feeStructure);
+      const monthlyAmount = monthlyHeads.reduce((sum, h) => sum + h.amount, 0);
       if (monthlyAmount <= 0) {
         result.skippedCount += 1;
         continue;
@@ -131,9 +129,6 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
         continue;
       }
 
-      const monthlyHeads = buildHeadsFromStructure(feeStructure).filter(
-        (h) => h.frequency === 'monthly' && h.amount > 0
-      );
       const monthlyHeadKeys = monthlyHeads.map((h) => h.key);
       const otherBreakdown = monthlyHeads
         .filter((h) => h.isOtherSubtype)
@@ -141,7 +136,7 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
           key: h.key,
           name: h.label,
           amount: h.amount,
-          frequency: h.frequency,
+          frequency: 'monthly',
         }));
       const otherMonthlyTotal = otherBreakdown.reduce((sum, item) => sum + item.amount, 0);
 
@@ -149,6 +144,20 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
         const head = monthlyHeads.find((h) => h.key === key && !h.isOtherSubtype);
         return head ? head.amount : 0;
       };
+
+      const previousMonthlyPending = getPreviousMonthlyPending(studentPayments, {
+        structure: feeStructure,
+        month: currentMonth,
+        currentMonthDue: monthlyAmount,
+        fallback: s.OutstandingAmount,
+      });
+      const payable = computeStudentTotalPayable(feeStructure, studentPayments, {
+        month: currentMonth,
+        academicYear: academicYearName,
+        storedOutstanding: s.OutstandingAmount,
+      });
+      // Before this month's SYSTEM row exists, payable = previous pending + current month fee.
+      const outstanding = payable.outstanding;
 
       await FeePayment.create({
         InstutionId: instCode,
@@ -158,15 +167,16 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
         TutionFee: String(getStandardMonthly('TutionFee')),
         LibraryFee: String(getStandardMonthly('LibraryFee')),
         ActivityFee: String(getStandardMonthly('ActivityFee')),
-        ExamFee: '0',
-        UniformFee: '0',
-        ProspectusFee: '0',
+        ExamFee: String(getStandardMonthly('ExamFee')),
+        UniformFee: String(getStandardMonthly('UniformFee')),
+        ProspectusFee: String(getStandardMonthly('ProspectusFee')),
+        AdmissionFee: String(getStandardMonthly('AdmissionFee')),
         TransportFee: String(getStandardMonthly('TransportFee')),
         OtherFee: String(otherMonthlyTotal),
         OtherFeeBreakdown: serializeOtherFeeBreakdown(otherBreakdown),
         SelectedFeeHeads: monthlyHeadKeys,
         PaidAmount: '0',
-        PendingAmount: String(monthlyAmount),
+        PendingAmount: String(previousMonthlyPending),
         ScholarshipAmount: '0',
         ConcessionAmount: '0',
         Month: currentMonth,
@@ -178,6 +188,11 @@ const generateMonthlyFeesForInstitution = async (instCode) => {
         Time: timeStr,
         Status: 'Pending',
       });
+
+      await Student.updateOne(
+        { _id: s._id },
+        { OutstandingAmount: String(outstanding) }
+      );
 
       result.generatedCount += 1;
       result.totalMonthlyAmount += monthlyAmount;

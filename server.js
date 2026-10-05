@@ -72,6 +72,7 @@ const sectionRoute = require('./routes/sectionRoute');
 const idCardRoute = require('./routes/idCardRoute');
 const auditLogRoute = require('./routes/auditLogRoute');
 const teacherAttendanceRoute = require('./routes/teacherAttendanceRoute');
+const storeRoute = require('./routes/storeRoute');
 const { getPublicInstitutionStatus } = require('./controller/publicInstitutionController');
 
 // Import middleware
@@ -323,6 +324,7 @@ app.use(`${BASE_URL}/class-schedule`, classScheduleNewRoute);
 app.use(`${BASE_URL}/id-card`, idCardRoute);
 app.use(`${BASE_URL}/audit-logs`, auditLogRoute);
 app.use(`${BASE_URL}/teacher-attendance`, teacherAttendanceRoute);
+app.use(`${BASE_URL}/store`, storeRoute);
 
 // 404 handler
 app.use((req, res) => {
@@ -354,17 +356,22 @@ const server = app.listen(PORT, HOST, () => {
   }
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM signal received: closing HTTP server');
-  server.close(() => {
+const shutdown = (signal) => {
+  logger.info(`${signal} signal received: closing HTTP server`);
+  server.close(async () => {
     logger.info('HTTP server closed');
-    mongoose.connection.close(false, () => {
+    try {
+      await mongoose.connection.close(false);
       logger.info('MongoDB connection closed');
-      process.exit(0);
-    });
+    } catch (error) {
+      logger.error('MongoDB close failed', { error: error.message });
+    }
+    process.exit(0);
   });
-});
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (err) => {
