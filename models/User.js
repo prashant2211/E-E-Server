@@ -52,6 +52,10 @@ const  userSchema= new Schema({
     required: true,
     default: false
   },
+  Active: {
+    type: Boolean,
+    default: true
+  },
   Department: {
     type: String,
   },

@@ -245,6 +245,13 @@ const login = async (req, res, next) => {
                 code: 401,
             });
         }
+        if (user.Active === false) {
+            return res.status(403).json({
+                message: 'This account is inactive. Please contact the school admin.',
+                success: false,
+                code: 403,
+            });
+        }
         if (
             user.UserType &&
             userType &&

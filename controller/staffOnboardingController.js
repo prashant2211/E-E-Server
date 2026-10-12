@@ -5,6 +5,10 @@ const { successResponse, errorResponse } = require('../utils/response');
 const { getPermissionSet } = require('./permissionAssinment');
 const nodemailer = require('nodemailer');
 
+const STAFF_ONBOARDING_EXCLUDED_ROLES = ['Student', 'Admin', 'SuperAdmin']
+const isExcludedStaffRole = (userType) =>
+  STAFF_ONBOARDING_EXCLUDED_ROLES.includes(String(userType || '').trim())
+
 /**
  * Get all available user types for staff onboarding
  */
@@ -30,6 +34,7 @@ const getAvailableUserTypes = async (req, res) => {
       { value: 'Examination Staff', label: 'Examination Staff', description: 'Manages exams, schedules, and student marksheets' },
       { value: 'Accounts Coordinator', label: 'Accounts Coordinator', description: 'Handles fees, payments, and finances' },
       { value: 'Mentor', label: 'Mentor', description: 'Tracks student progress and manages classes' },
+      { value: 'Warden', label: 'Warden', description: 'Looks after hostel rooms, boarders, and night routine' },
     ];
 
     return successResponse(res, userTypes, 'User types retrieved successfully');
@@ -76,6 +81,10 @@ const onboardStaff = async (req, res) => {
     // Validation
     if (!FirstName || !LastName || !Email || !Phone || !UserName || !UserType || !Password) {
       return errorResponse(res, 'Please provide all required fields', 400);
+    }
+
+    if (isExcludedStaffRole(UserType)) {
+      return errorResponse(res, 'Admin accounts cannot be created from Staff Onboarding.', 400);
     }
 
     // Get institution details from current user - never hardcode institution name
@@ -239,10 +248,25 @@ const getAllStaff = async (req, res) => {
 
     let searchCondition = {
       InstutionCode: req.user?.InstutionCode,
-      UserType: { $ne: 'Student' }, // Exclude students
+      UserType: { $nin: STAFF_ONBOARDING_EXCLUDED_ROLES },
     };
 
     if (userTypeFilter) {
+      if (isExcludedStaffRole(userTypeFilter)) {
+        return successResponse(
+          res,
+          {
+            staff: [],
+            pagination: {
+              currentPage: page,
+              totalPages: 0,
+              totalItems: 0,
+              itemsPerPage: limit,
+            },
+          },
+          'Staff members retrieved successfully'
+        );
+      }
       searchCondition.UserType = userTypeFilter;
     }
 
@@ -314,8 +338,16 @@ const updateStaff = async (req, res) => {
       updateData.Password = await bcrypt.hash(req.body.Password, 10);
     }
 
+    if (updateData.UserType && isExcludedStaffRole(updateData.UserType)) {
+      return errorResponse(res, 'Admin accounts cannot be managed from Staff Onboarding.', 400);
+    }
+
     const updatedStaff = await User.findOneAndUpdate(
-      { _id: staffId, InstutionCode: req.user?.InstutionCode },
+      {
+        _id: staffId,
+        InstutionCode: req.user?.InstutionCode,
+        UserType: { $nin: STAFF_ONBOARDING_EXCLUDED_ROLES },
+      },
       { $set: updateData },
       { new: true, runValidators: true }
     ).select('-Password -__v');
@@ -357,7 +389,7 @@ const deleteStaff = async (req, res) => {
     const deletedStaff = await User.findOneAndDelete({
       _id: staffId,
       InstutionCode: req.user?.InstutionCode,
-      UserType: { $ne: 'Student' }
+      UserType: { $nin: STAFF_ONBOARDING_EXCLUDED_ROLES },
     });
 
     if (!deletedStaff) {
