@@ -1,0 +1,16 @@
+{
+    "E11000 duplicate key error": "This Record already exists. Please use a different value.",
+    "CastError": "Invalid format. Please check the data and try again.",
+    "ValidationError": "Some required fields are missing or invalid. Please review your input.",
+    "MongoNetworkError": "Unable to connect to the database. Please check your internet connection or try again later.",
+    "MongoTimeoutError": "The request timed out. Please try again.",
+    "MongoParseError": "There was an error processing the request. Please contact support.",
+    "MongoWriteConcernError": "There was an issue saving your data. Please try again.",
+    "DocumentNotFoundError": "The requested item was not found.",
+    "NotFound": "No records matched your search.",
+    "BSONError": "There was an error processing the data format. Please check your input.",
+    "BulkWriteError": "Some of the data could not be saved. Please try again.",
+    "MissingSchemaError": "The data structure is invalid. Please contact support.",
+    "DisconnectedError": "The database connection was lost. Please try again later.",
+    "UnknownError": "Something went wrong. Please try again later."
+  }
